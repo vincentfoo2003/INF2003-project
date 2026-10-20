@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MovieShare - Movie Loans</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --disabled: #475569;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 20px 40px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--disabled);
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .poster {
+            width: 100%;
+            height: 330px;
+            background-color: #334155;
+            object-fit: cover;
+        }
+
+        .content {
+            padding: 16px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        h3 {
+            margin: 0 0 8px 0;
+            font-size: 1.1rem;
+        }
+
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 16px;
+        }
+
+        button {
+            margin-top: auto;
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn-loan {
+            background-color: var(--accent);
+            color: white;
+        }
+
+        .btn-loan:hover {
+            background-color: var(--accent-hover);
+        }
+
+        .btn-disabled {
+            background-color: var(--disabled);
+            color: #cbd5e1;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>MovieShare</h1>
+        <div>
+            <span>Active Loans: 1</span>
+        </div>
+    </header>
+
+    <div class="grid">
+        <!-- Available Movie Card -->
+        <div class="card">
+            <img class="poster" src="https://image.tmdb.org/t/p/w500/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg"
+                alt="Deadpool & Wolverine Poster">
+            <div class="content">
+                <h3>Deadpool & Wolverine</h3>
+                <span class="meta">Action, Comedy • 2024</span>
+                <button class="btn-loan">Loan Movie</button>
+            </div>
+        </div>
+
+        <!-- Available Movie Card -->
+        <div class="card">
+            <img class="poster" src="https://image.tmdb.org/t/p/w500/8VG8fAgKjIGRoE63GviPIyTKYG0.jpg"
+                alt="Inside Out 2 Poster">
+            <div class="content">
+                <h3>Inside Out 2</h3>
+                <span class="meta">Animation, Family • 2024</span>
+                <button class="btn-loan">Loan Movie</button>
+            </div>
+        </div>
+
+        <!-- Loaned Movie Card -->
+        <div class="card">
+            <img class="poster" src="https://image.tmdb.org/t/p/w500/8kOWDBK6XlPUzckuHDo3Oph0zVU.jpg"
+                alt="Inception Poster" style="opacity: 0.5;">
+            <div class="content">
+                <h3>Inception</h3>
+                <span class="meta">Sci-Fi, Action • 2010</span>
+                <button class="btn-disabled" disabled>Currently Loaned</button>
+            </div>
+        </div>
+
+        <!-- Available Movie Card -->
+        <div class="card">
+            <img class="poster" src="https://image.tmdb.org/t/p/w500/qJ2tW6WMUDux911r6m7haRef0WH.jpg"
+                alt="The Dark Knight Poster">
+            <div class="content">
+                <h3>The Dark Knight</h3>
+                <span class="meta">Action, Crime • 2008</span>
+                <button class="btn-loan">Loan Movie</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+
+</html>

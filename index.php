@@ -23,7 +23,6 @@ try {
     if ($sort === 'release_desc' || $sort === 'release_asc') {
         $order = $sort === 'release_desc' ? -1 : 1;
         
-        // Safely parse dates by splitting the string and using $convert with onError fallbacks
         $pipeline = [
             ['$addFields' => [
                 'dateParts' => ['$split' => [['$ifNull' => ['$releaseDate', '1/1/1970']], '/']]
@@ -57,7 +56,8 @@ try {
             ['$sort' => [
                 'parsedYear' => $order,
                 'parsedMonth' => $order,
-                'parsedDay' => $order
+                'parsedDay' => $order,
+                '_id' => 1 // Unique tie-breaker for stable pagination
             ]],
             ['$skip' => $skip],
             ['$limit' => $limit]
@@ -65,12 +65,11 @@ try {
         $movies = mongo_aggregate($pipeline);
     } else {
         // Weighted Rating Pipeline
-        // Formula: (v / (v+m)) * R + (m / (v+m)) * C
         $pipeline = [
             ['$addFields' => [
                 'v' => [
                     '$convert' => [
-                        'input' => ['$ifNull' => ['$vote_count', 0]], // Change this if your DB uses 'votes' or 'numVotes'
+                        'input' => ['$ifNull' => ['$vote_count', 0]],
                         'to' => 'double',
                         'onError' => 0,
                         'onNull' => 0
@@ -99,7 +98,10 @@ try {
                     ]
                 ]
             ]],
-            ['$sort' => ['weighted_rating' => -1]],
+            ['$sort' => [
+                'weighted_rating' => -1,
+                '_id' => 1 // Unique tie-breaker for stable pagination
+            ]],
             ['$skip' => $skip],
             ['$limit' => $limit]
         ];

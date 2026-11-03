@@ -2,7 +2,7 @@
 require_once __DIR__ . '/config.php';
 
 $sortOptions = [
-    'rating'       => 'Highest rating',
+    'rating'       => 'Highest rating (Weighted)',
     'release_desc' => 'Newest release date',
     'release_asc'  => 'Oldest release date',
 ];
@@ -64,13 +64,46 @@ try {
         ];
         $movies = mongo_aggregate($pipeline);
     } else {
-        // Default: Sort by rating
-        $options = [
-            'sort' => ['rating' => -1],
-            'limit' => $limit,
-            'skip' => $skip
+        // Weighted Rating Pipeline
+        // Formula: (v / (v+m)) * R + (m / (v+m)) * C
+        $pipeline = [
+            ['$addFields' => [
+                'v' => [
+                    '$convert' => [
+                        'input' => ['$ifNull' => ['$vote_count', 0]], // Change this if your DB uses 'votes' or 'numVotes'
+                        'to' => 'double',
+                        'onError' => 0,
+                        'onNull' => 0
+                    ]
+                ],
+                'R' => [
+                    '$convert' => [
+                        'input' => ['$ifNull' => ['$rating', 0]],
+                        'to' => 'double',
+                        'onError' => 0,
+                        'onNull' => 0
+                    ]
+                ]
+            ]],
+            ['$addFields' => [
+                'weighted_rating' => [
+                    '$cond' => [
+                        'if' => ['$gt' => ['$v', 0]],
+                        'then' => [
+                            '$add' => [
+                                ['$multiply' => [['$divide' => ['$v', ['$add' => ['$v', 500]]]], '$R']],
+                                ['$multiply' => [['$divide' => [500, ['$add' => ['$v', 500]]]], 6.5]]
+                            ]
+                        ],
+                        'else' => 0
+                    ]
+                ]
+            ]],
+            ['$sort' => ['weighted_rating' => -1]],
+            ['$skip' => $skip],
+            ['$limit' => $limit]
         ];
-        $movies = mongo_find([], $options);
+        $movies = mongo_aggregate($pipeline);
     }
 } catch (Throwable $e) {
     error_log('MongoDB error: ' . $e->getMessage());

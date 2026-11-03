@@ -136,7 +136,7 @@ function current_user(): ?array {
     if (empty($_SESSION['user_id'])) return null;
     static $user = null;
     if ($user === null) {
-        $stmt = db()->prepare('SELECT user_id, name, email FROM users WHERE user_id = ? LIMIT 1');
+        $stmt = db()->prepare('SELECT user_id, name, email, role FROM users WHERE user_id = ? LIMIT 1');
         $stmt->execute([(int)$_SESSION['user_id']]);
         $row = $stmt->fetch();
         if ($row === false) { unset($_SESSION['user_id']); return null; }
@@ -305,6 +305,10 @@ function page_header(string $title): void {
             <a href="index.php">Movies</a>
             <a href="checkout.php">Cart <span class="pill"><?= $cartCount ?></span></a>
             <?php if ($user !== null): ?>
+                <a href="dashboard.php">Dashboard</a>
+                <?php if (($user['role'] ?? 'user') === 'admin'): ?>
+                    <a href="admin_dashboard.php" style="color: #dc3545; font-weight: bold;">Admin</a>
+                <?php endif; ?>
                 <span class="who">Hi, <?= e($user['name']) ?></span>
                 <form method="post" action="logout.php" class="inline-form">
                     <?= csrf_field() ?><button type="submit" class="link-button">Log out</button>
@@ -320,15 +324,5 @@ function page_header(string $title): void {
 <?php if ($flash !== null): ?>
     <div class="alert alert-<?= e($flash['type']) ?>"><?= e($flash['msg']) ?></div>
 <?php endif; ?>
-    <?php
-}
-
-function page_footer(): void {
-    ?>
-</main>
-<footer class="site-footer">
-    <div class="wrap"><p>MovieShare demo &middot; every rental is $<?= number_format(MOVIE_PRICE, 2) ?> &middot; posters via OMDb API</p></div>
-</footer>
-</body></html>
     <?php
 }

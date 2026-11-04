@@ -12,76 +12,74 @@ if (!array_key_exists($sort, $sortOptions)) {
     $sort = 'rating';
 }
 
+$search = trim((string)($_GET['q'] ?? ''));
 $page = max(1, (int)($_GET['page'] ?? 1));
 $limit = 24;
 $skip = ($page - 1) * $limit;
 
+// 1. Build the MongoDB Match Filter for Search
+$filter = [];
+$matchStage = null;
+
+if ($search !== '') {
+    // Case-insensitive regex search across title, overview, and genres
+    $regex = new MongoDB\BSON\Regex(preg_quote($search), 'i');
+    $filter = [
+        '$or' => [
+            ['title' => $regex],
+            ['overview' => $regex],
+            ['genres' => $regex]
+        ]
+    ];
+    $matchStage = ['$match' => $filter];
+}
+
 try {
-    $total = mongo_count();
+    $total = mongo_count($filter);
     $totalPages = max(1, ceil($total / $limit));
+    $pipeline = [];
+
+    // Inject the match stage at the very beginning if a search is active
+    if ($matchStage) {
+        $pipeline[] = $matchStage;
+    }
 
     if ($sort === 'release_desc' || $sort === 'release_asc') {
         $order = $sort === 'release_desc' ? -1 : 1;
         
-        $pipeline = [
+        $pipeline = array_merge($pipeline, [
             ['$addFields' => [
                 'dateParts' => ['$split' => [['$ifNull' => ['$releaseDate', '1/1/1970']], '/']]
             ]],
             ['$addFields' => [
                 'parsedYear' => [
-                    '$convert' => [
-                        'input' => ['$arrayElemAt' => ['$dateParts', 2]],
-                        'to' => 'int',
-                        'onError' => 1970,
-                        'onNull' => 1970
-                    ]
+                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 2]], 'to' => 'int', 'onError' => 1970, 'onNull' => 1970]
                 ],
                 'parsedMonth' => [
-                    '$convert' => [
-                        'input' => ['$arrayElemAt' => ['$dateParts', 1]],
-                        'to' => 'int',
-                        'onError' => 1,
-                        'onNull' => 1
-                    ]
+                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 1]], 'to' => 'int', 'onError' => 1, 'onNull' => 1]
                 ],
                 'parsedDay' => [
-                    '$convert' => [
-                        'input' => ['$arrayElemAt' => ['$dateParts', 0]],
-                        'to' => 'int',
-                        'onError' => 1,
-                        'onNull' => 1
-                    ]
+                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 0]], 'to' => 'int', 'onError' => 1, 'onNull' => 1]
                 ]
             ]],
             ['$sort' => [
                 'parsedYear' => $order,
                 'parsedMonth' => $order,
                 'parsedDay' => $order,
-                '_id' => 1 // Unique tie-breaker for stable pagination
+                '_id' => 1
             ]],
             ['$skip' => $skip],
             ['$limit' => $limit]
-        ];
-        $movies = mongo_aggregate($pipeline);
+        ]);
     } else {
         // Weighted Rating Pipeline
-        $pipeline = [
+        $pipeline = array_merge($pipeline, [
             ['$addFields' => [
                 'v' => [
-                    '$convert' => [
-                        'input' => ['$ifNull' => ['$vote_count', 0]],
-                        'to' => 'double',
-                        'onError' => 0,
-                        'onNull' => 0
-                    ]
+                    '$convert' => ['input' => ['$ifNull' => ['$vote_count', 0]], 'to' => 'double', 'onError' => 0, 'onNull' => 0]
                 ],
                 'R' => [
-                    '$convert' => [
-                        'input' => ['$ifNull' => ['$rating', 0]],
-                        'to' => 'double',
-                        'onError' => 0,
-                        'onNull' => 0
-                    ]
+                    '$convert' => ['input' => ['$ifNull' => ['$rating', 0]], 'to' => 'double', 'onError' => 0, 'onNull' => 0]
                 ]
             ]],
             ['$addFields' => [
@@ -100,13 +98,15 @@ try {
             ]],
             ['$sort' => [
                 'weighted_rating' => -1,
-                '_id' => 1 // Unique tie-breaker for stable pagination
+                '_id' => 1
             ]],
             ['$skip' => $skip],
             ['$limit' => $limit]
-        ];
-        $movies = mongo_aggregate($pipeline);
+        ]);
     }
+    
+    $movies = mongo_aggregate($pipeline);
+    
 } catch (Throwable $e) {
     error_log('MongoDB error: ' . $e->getMessage());
     die('Database error: ' . $e->getMessage()); 
@@ -118,8 +118,10 @@ page_header('Movies');
 ?>
 <section class="toolbar">
     <h1>Browse movies</h1>
-    <form method="get" action="index.php" class="filter-form">
-        <label for="sort">Sort by</label>
+    <form method="get" action="index.php" class="filter-form" style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <input type="search" name="q" placeholder="Search title, genre, keyword..." value="<?= e($search) ?>" style="padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); min-width: 250px;">
+        
+        <label for="sort" style="align-self: center;">Sort by</label>
         <select name="sort" id="sort" onchange="this.form.submit()">
             <?php foreach ($sortOptions as $value => $label): ?>
                 <option value="<?= e($value) ?>"<?= $value === $sort ? ' selected' : '' ?>>
@@ -132,7 +134,7 @@ page_header('Movies');
 </section>
 
 <?php if (!$movies): ?>
-    <p class="empty">No movies found in the database.</p>
+    <p class="empty">No movies found matching your search.</p>
 <?php else: ?>
     <div class="grid">
         <?php foreach ($movies as $movie): ?>
@@ -157,12 +159,16 @@ page_header('Movies');
 
     <?php if ($totalPages > 1): ?>
         <div class="pagination">
+            <?php 
+                // Preserve search query in pagination links
+                $queryStr = '&sort=' . urlencode($sort) . '&q=' . urlencode($search); 
+            ?>
             <?php if ($page > 1): ?>
-                <a href="?sort=<?= e($sort) ?>&page=<?= $page - 1 ?>" class="btn btn-ghost">&laquo; Previous</a>
+                <a href="?page=<?= $page - 1 ?><?= $queryStr ?>" class="btn btn-ghost">&laquo; Previous</a>
             <?php endif; ?>
             <span class="muted">Page <?= $page ?> of <?= $totalPages ?></span>
             <?php if ($page < $totalPages): ?>
-                <a href="?sort=<?= e($sort) ?>&page=<?= $page + 1 ?>" class="btn btn-ghost">Next &raquo;</a>
+                <a href="?page=<?= $page + 1 ?><?= $queryStr ?>" class="btn btn-ghost">Next &raquo;</a>
             <?php endif; ?>
         </div>
     <?php endif; ?>

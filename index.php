@@ -37,79 +37,57 @@ if ($search !== '') {
 try {
     $total = mongo_count($filter);
     $totalPages = max(1, ceil($total / $limit));
-    $pipeline = [];
 
-    // Inject the match stage at the very beginning if a search is active
-    if ($matchStage) {
-        $pipeline[] = $matchStage;
+    /*
+     * Sort on STORED, INDEXED fields (populated by migrate_movie_fields.php):
+     *   - releaseDateSortable : BSON Date, index { releaseDateSortable:1, _id:1 }
+     *   - weighted_rating     : double,    index { weighted_rating:-1, _id:1 }
+     * _id is the tie-breaker for stable pagination and matches the index keys.
+     */
+    if ($sort === 'release_desc' || $sort === 'release_asc') {
+        /*
+         * Keep the _id tie-breaker pointing the SAME direction as the date so
+         * the single ascending index { releaseDateSortable:1, _id:1 } serves
+         * both: a forward walk for "oldest" and a full reverse walk for
+         * "newest". (A descending date with an ascending _id would NOT be a
+         * pure reverse of the index, forcing an in-memory sort.)
+         */
+        $order = $sort === 'release_desc' ? -1 : 1;
+        $sortSpec = ['releaseDateSortable' => $order, '_id' => $order];
+    } else {
+        $sortSpec = ['weighted_rating' => -1, '_id' => 1];
     }
 
-    if ($sort === 'release_desc' || $sort === 'release_asc') {
-        $order = $sort === 'release_desc' ? -1 : 1;
-        
-        $pipeline = array_merge($pipeline, [
-            ['$addFields' => [
-                'dateParts' => ['$split' => [['$ifNull' => ['$releaseDate', '1/1/1970']], '/']]
-            ]],
-            ['$addFields' => [
-                'parsedYear' => [
-                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 2]], 'to' => 'int', 'onError' => 1970, 'onNull' => 1970]
-                ],
-                'parsedMonth' => [
-                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 1]], 'to' => 'int', 'onError' => 1, 'onNull' => 1]
-                ],
-                'parsedDay' => [
-                    '$convert' => ['input' => ['$arrayElemAt' => ['$dateParts', 0]], 'to' => 'int', 'onError' => 1, 'onNull' => 1]
-                ]
-            ]],
-            ['$sort' => [
-                'parsedYear' => $order,
-                'parsedMonth' => $order,
-                'parsedDay' => $order,
-                '_id' => 1
-            ]],
-            ['$skip' => $skip],
-            ['$limit' => $limit]
+    if ($matchStage === null) {
+        /*
+         * No search: a pure sort over the whole collection. A plain find()
+         * with this sort is served directly by the index (IXSCAN), so there
+         * is no in-memory sort and no collection scan.
+         */
+        $movies = mongo_find($filter, [
+            'sort'  => $sortSpec,
+            'skip'  => $skip,
+            'limit' => $limit,
         ]);
     } else {
-        // Weighted Rating Pipeline
-        $pipeline = array_merge($pipeline, [
-            ['$addFields' => [
-                'v' => [
-                    '$convert' => ['input' => ['$ifNull' => ['$vote_count', 0]], 'to' => 'double', 'onError' => 0, 'onNull' => 0]
-                ],
-                'R' => [
-                    '$convert' => ['input' => ['$ifNull' => ['$rating', 0]], 'to' => 'double', 'onError' => 0, 'onNull' => 0]
-                ]
-            ]],
-            ['$addFields' => [
-                'weighted_rating' => [
-                    '$cond' => [
-                        'if' => ['$gt' => ['$v', 0]],
-                        'then' => [
-                            '$add' => [
-                                ['$multiply' => [['$divide' => ['$v', ['$add' => ['$v', 500]]]], '$R']],
-                                ['$multiply' => [['$divide' => [500, ['$add' => ['$v', 500]]]], 6.5]]
-                            ]
-                        ],
-                        'else' => 0
-                    ]
-                ]
-            ]],
-            ['$sort' => [
-                'weighted_rating' => -1,
-                '_id' => 1
-            ]],
+        /*
+         * Active search: the regex $or filter cannot use the sort index, so
+         * this path still scans to match. But because we now sort on the
+         * STORED fields, the expensive per-document date parsing and weighted
+         * rating math are gone -- the pipeline only filters then sorts.
+         */
+        $pipeline = [
+            $matchStage,
+            ['$sort' => $sortSpec],
             ['$skip' => $skip],
-            ['$limit' => $limit]
-        ]);
+            ['$limit' => $limit],
+        ];
+        $movies = mongo_aggregate($pipeline);
     }
-    
-    $movies = mongo_aggregate($pipeline);
-    
+
 } catch (Throwable $e) {
     error_log('MongoDB error: ' . $e->getMessage());
-    die('Database error: ' . $e->getMessage()); 
+    die('Database error: ' . $e->getMessage());
 }
 
 $placeholder = placeholder_poster();

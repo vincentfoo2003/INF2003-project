@@ -47,7 +47,10 @@ if (!empty($movie['production_companies'])) {
 $companiesStr = $companies ? implode(', ', $companies) : 'N/A';
 
 // Format adult flag boolean/string
-$isAdult = (!empty($movie['adult']) && $movie['adult'] !== 'False' && $movie['adult'] !== 'false' && $movie['adult'] !== false) ? 'Yes' : 'No';
+// Normalize the value so any casing of "false"/"true", booleans, and 0/1 are handled correctly
+$adultRaw = $movie['adult'] ?? null;
+$adultNormalized = is_string($adultRaw) ? strtolower(trim($adultRaw)) : $adultRaw;
+$isAdult = (!empty($adultNormalized) && $adultNormalized !== 'false' && $adultNormalized !== '0') ? 'Yes' : 'No';
 
 // Safely locate the vote count regardless of exact schema naming conventions
 $voteCount = $movie['vote_count'] ?? $movie['voteCount'] ?? $movie['numVotes'] ?? $movie['votes'] ?? 0;

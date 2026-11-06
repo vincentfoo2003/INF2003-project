@@ -254,6 +254,49 @@ if ($sample !== null) {
     $rows[] = ['findOne by _id', summarize_explain($explain), time_runs($run, $RUNS)];
 }
 
+/*
+ * Projection comparison: same indexed sort query, FULL document vs PROJECTED
+ * to the four fields index.php renders. Projections don't change the query
+ * plan (still IXSCAN), so the win is wire size + serialization, not docs
+ * examined. We measure payload bytes (the real signal) and wall-clock.
+ */
+function payload_bytes(array $docs): int {
+    // Measure serialized payload size — the real signal for projections.
+    // Prefer BSON byte size (what crosses the wire); if a document shape
+    // trips BSON reconstruction on this driver version, fall back to the
+    // JSON-encoded length, which scales with the same field content and is
+    // still a fair relative measure for full-vs-projected comparison.
+    $total = 0;
+    foreach ($docs as $d) {
+        try {
+            $total += strlen((string) MongoDB\BSON\Document::fromPHP($d));
+        } catch (Throwable $e) {
+            $total += strlen(json_encode($d));
+        }
+    }
+    return $total;
+}
+
+$projSort = ['weighted_rating' => -1, '_id' => 1];
+$projFields = ['title' => 1, 'rating' => 1, 'releaseDate' => 1];
+
+$fullDocs = mongo_find([], ['sort' => $projSort, 'limit' => $PAGE_SIZE]);
+$projDocs = mongo_find([], ['sort' => $projSort, 'limit' => $PAGE_SIZE, 'projection' => $projFields]);
+
+$fullBytes = payload_bytes($fullDocs);
+$projBytes = payload_bytes($projDocs);
+
+$fullTime = time_runs(fn() => count(mongo_find([], ['sort' => $projSort, 'limit' => $PAGE_SIZE])), $RUNS);
+$projTime = time_runs(fn() => count(mongo_find([], ['sort' => $projSort, 'limit' => $PAGE_SIZE, 'projection' => $projFields])), $RUNS);
+
+$projectionResult = [
+    'fullBytes'  => $fullBytes,
+    'projBytes'  => $projBytes,
+    'fullWall'   => $fullTime['median'],
+    'projWall'   => $projTime['median'],
+    'pageSize'   => $PAGE_SIZE,
+];
+
 /* --------------------------- print table ----------------------------- */
 printf("%-34s %-9s %12s %10s %10s\n", 'Workload', 'Stage', 'docsExam', 'exec(ms)', 'wall-med');
 echo str_repeat('-', 68) . "\n";
@@ -271,6 +314,16 @@ echo str_repeat('=', 68) . "\n";
 echo "Columns: Stage=winning plan (IXSCAN good, COLLSCAN+SORT = full scan),\n";
 echo "         docsExam=totalDocsExamined (lower is better),\n";
 echo "         exec(ms)=server executionTimeMillis, wall-med=median end-to-end ms.\n";
+
+/* ---- projection comparison summary ---- */
+$pr = $projectionResult;
+$bytesCut = $pr['fullBytes'] > 0 ? (1 - $pr['projBytes'] / $pr['fullBytes']) * 100 : 0;
+echo "\n" . str_repeat('-', 68) . "\n";
+echo "Projection effect (same IXSCAN query, {$pr['pageSize']} docs/page):\n";
+printf("  Full document : %8s bytes  | wall median %7.2f ms\n", number_format($pr['fullBytes']), $pr['fullWall']);
+printf("  Projected (4) : %8s bytes  | wall median %7.2f ms\n", number_format($pr['projBytes']), $pr['projWall']);
+printf("  Payload reduced by %.1f%% (fields: _id, title, rating, releaseDate)\n", $bytesCut);
+echo str_repeat('-', 68) . "\n";
 
 /* --------------------------- append report --------------------------- */
 /*
@@ -315,6 +368,18 @@ foreach ($rows as [$name, $ex, $tm]) {
         $tm['min'], $tm['median'], $tm['mean']
     );
 }
+$lines[] = "";
+
+/* projection comparison block in the report */
+$pr = $projectionResult;
+$bytesCut = $pr['fullBytes'] > 0 ? (1 - $pr['projBytes'] / $pr['fullBytes']) * 100 : 0;
+$lines[] = "**Projection effect** (same IXSCAN query, {$pr['pageSize']} docs/page):";
+$lines[] = "";
+$lines[] = "| Variant | Payload bytes | wall median ms |";
+$lines[] = "|---|---:|---:|";
+$lines[] = sprintf("| Full document | %s | %.2f |", number_format($pr['fullBytes']), $pr['fullWall']);
+$lines[] = sprintf("| Projected (_id, title, rating, releaseDate) | %s | %.2f |", number_format($pr['projBytes']), $pr['projWall']);
+$lines[] = sprintf("| **Reduction** | **%.1f%%** | — |", $bytesCut);
 $lines[] = "";
 
 $header = "# MongoDB Indexing — Benchmark Results\n";

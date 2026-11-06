@@ -58,6 +58,15 @@ try {
         $sortSpec = ['weighted_rating' => -1, '_id' => 1];
     }
 
+    /*
+     * Projection: return only the fields the card template renders
+     * (_id, title, rating, releaseDate). Without this, each result ships the
+     * full document -- including large overview / keywords /
+     * production_companies strings we never display -- across the network.
+     * Trimming to four fields cuts wire size and processing per page.
+     */
+    $projection = ['title' => 1, 'rating' => 1, 'releaseDate' => 1];
+
     if ($matchStage === null) {
         /*
          * No search: a pure sort over the whole collection. A plain find()
@@ -65,9 +74,10 @@ try {
          * is no in-memory sort and no collection scan.
          */
         $movies = mongo_find($filter, [
-            'sort'  => $sortSpec,
-            'skip'  => $skip,
-            'limit' => $limit,
+            'sort'       => $sortSpec,
+            'skip'       => $skip,
+            'limit'      => $limit,
+            'projection' => $projection,
         ]);
     } else {
         /*
@@ -81,6 +91,7 @@ try {
             ['$sort' => $sortSpec],
             ['$skip' => $skip],
             ['$limit' => $limit],
+            ['$project' => $projection + ['_id' => 1]],
         ];
         $movies = mongo_aggregate($pipeline);
     }

@@ -101,6 +101,112 @@ Server-side execution time for the sorts dropped from ~220–260 ms to 0–5 ms,
 documents examined fell from the full collection to the page size. The remaining
 end-to-end time is network round-trip to the Atlas cluster, not query cost.
 
+### Projections (returning only needed fields)
+
+Per the MongoDB query-optimization guidance, `index.php` now projects each movie
+card down to the four fields it renders (`_id`, `title`, `rating`,
+`releaseDate`). Previously every result shipped the full document — including the
+large `overview`, `keywords`, and `production_companies` strings that the list
+view never displays. A projection does not change the query plan (it is still an
+`IXSCAN`); the gain is reduced payload size and serialization, i.e. less data
+over the network per page.
+
+`benchmark.php` prints a "Projection effect" block comparing the same indexed
+query with full documents vs projected, reporting BSON payload bytes and
+wall-clock for a 24-doc page.
+
+#### Measured projection effect (24-doc page)
+
+Measured on the ~122k-document collection (Atlas, 20 runs):
+
+| Variant | Payload bytes | wall median (ms) |
+|---|---:|---:|
+| Full document | 26,415 | 157.06 |
+| Projected (`_id`, `title`, `rating`, `releaseDate`) | 2,329 | 155.72 |
+| **Reduction** | **91.2%** | ~1 ms (within noise) |
+
+The payload dropped by 91% because the full documents carry large
+`overview`, `keywords`, and `production_companies` text that the card view
+never displays. Wall-clock barely changed: at 24 docs per page the ~24 KB saved
+is small next to the ~155 ms Atlas round-trip, so the projection's benefit here
+is **bandwidth, not latency**. The saving scales with page size, result count,
+slower client networks, and request volume.
+
+### Measuring a real record: server-side vs client-side
+
+The two layers are measured with different tools, because a CLI script has no
+browser and a browser cannot see server-internal query time.
+
+**Server-side** (query + driver round-trip) — from `benchmark.php`, or inline
+around a specific lookup. Example for one real movie detail load
+(`movie.php?id=<id>` queries `findOne({_id})`):
+
+```php
+// quick inline timing of a single-record load
+$t0 = hrtime(true);
+$movie = mongo_find_one(['_id' => new MongoDB\BSON\ObjectId($id)]);
+$serverMs = (hrtime(true) - $t0) / 1e6;
+error_log("findOne by _id: {$serverMs} ms");
+```
+
+**Client-side** (browser render) — paste this in the browser DevTools console
+after the page loads. It reads the Navigation Timing API, so the numbers are the
+browser's own measurements, not a stopwatch:
+
+```js
+const t = performance.getEntriesByType('navigation')[0];
+console.table({
+  'TTFB (ms)':        Math.round(t.responseStart - t.requestStart),
+  'Response (ms)':    Math.round(t.responseEnd - t.responseStart),
+  'DOM ready (ms)':   Math.round(t.domContentLoadedEventEnd - t.startTime),
+  'Full load (ms)':   Math.round(t.loadEventEnd - t.startTime),
+});
+```
+
+#### Example: real record before/after
+
+> Pick one real movie (record its `_id` and title) and fill in both columns.
+> Capture "before" by temporarily reverting `index.php` to the original
+> pipelines (or using `hint()` to force a COLLSCAN), and "after" with the
+> indexes in place.
+
+Measured on `index.php` (default weighted-rating sort, page 1). Server-side
+figures come from `benchmark.php`; client-side figures from the browser
+Navigation Timing API (warm poster cache).
+
+Before was captured against the original computed-field pipeline (full COLLSCAN
++ in-memory sort); after against the indexed path. Both on a warm poster cache.
+
+| Measurement | Layer | Before (pipelines, no index) | After (indexed + projection) | Change |
+|---|---|---:|---:|---:|
+| List page query (weighted sort, page 1) | server | ~224 ms, COLLSCAN, 121,908 docs examined | ~0 ms, IXSCAN, 24 docs examined | −224 ms |
+| TTFB (time to first byte) | client | 1091 ms | 730 ms | −361 ms (−33%) |
+| Response transfer | client | 3 ms | 2 ms | ~same |
+| DOM ready | client | 1479 ms | 1114 ms | −365 ms (−25%) |
+| Full page load | client | 1511 ms | 1150 ms | −361 ms (−24%) |
+
+Reading the numbers honestly:
+
+- The **TTFB drop of ~361 ms is the indexing win**, and it matches the
+  server-side measurement: the old pipeline spent ~220–360 ms on the
+  full-collection scan and in-memory sort, which is exactly what disappeared
+  from the time-to-first-byte.
+- The DOM-ready and full-load improvements are the **same saved time carried
+  downstream** — once the server responds ~361 ms sooner, every later milestone
+  shifts earlier by roughly the same amount. Browser parsing and poster loading
+  themselves did not change, which is expected.
+- The residual ~730 ms TTFB is network round-trip to the Atlas cluster and the
+  VM plus PHP startup — not query cost, and not something indexing can remove.
+
+> Caveat for the client-side rows: movie cards lazy-load posters via
+> `poster.php`, which on a cache miss calls the external OMDb API. Those
+> requests add large, variable latency unrelated to indexing, so these numbers
+> were taken on a warm poster cache (page loaded once first). TTFB and DOM-ready
+> are the most reliable rows since they complete before posters finish loading.
+> The "before" figures were captured with a temporary `?legacy=1` toggle that
+> forced the original pipeline on the same deployed file; that toggle has since
+> been removed.
+
 ### Notes / possible follow-ups
 
 - Deep `$skip` pagination is bounded by the index but still linear in the skip

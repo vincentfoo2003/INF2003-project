@@ -50,14 +50,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// Fetch all data for the dashboard with JOINs for user names
-$users = $pdo->query("SELECT user_id, name, email, role FROM users ORDER BY user_id ASC")->fetchAll();
+/* -------- Pagination --------
+ * The admin lists are unfiltered (they show everything), so with ~50k loans
+ * the old unpaginated queries read and rendered the entire table in one page.
+ * No index can fix a full read — the correct fix is LIMIT-based pagination.
+ * Each list has its own page param (up/lp/pp) so they page independently.
+ * ORDER BY is on each table's PRIMARY KEY, so the sort itself is already free;
+ * LIMIT is what bounds the work and the rendered row count.
+ */
+$perPage = 25;
+
+/*
+ * TEMPORARY BENCHMARK TOGGLE — remove after capturing the pagination "before".
+ * ?nolimit=1 reverts to the original behaviour: fetch ALL rows with no LIMIT,
+ * so the browser can time the pre-pagination state on the same deployed file.
+ */
+$NOLIMIT = (($_GET['nolimit'] ?? '') === '1');
+
+$userPage    = max(1, (int)($_GET['up'] ?? 1));
+$loanPage    = max(1, (int)($_GET['lp'] ?? 1));
+$paymentPage = max(1, (int)($_GET['pp'] ?? 1));
+
+$userOffset    = ($userPage - 1) * $perPage;
+$loanOffset    = ($loanPage - 1) * $perPage;
+$paymentOffset = ($paymentPage - 1) * $perPage;
+
+// Totals for page counts.
+$userTotal    = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
+$loanTotal    = (int)$pdo->query("SELECT COUNT(*) FROM loans")->fetchColumn();
+$paymentTotal = (int)$pdo->query("SELECT COUNT(*) FROM payments")->fetchColumn();
+
+$userPages    = max(1, (int)ceil($userTotal / $perPage));
+$loanPages    = max(1, (int)ceil($loanTotal / $perPage));
+$paymentPages = max(1, (int)ceil($paymentTotal / $perPage));
+
+// Fetch one page of each list (LIMIT/OFFSET are cast ints, not user text).
+// With ?nolimit=1 the LIMIT/OFFSET are dropped to reproduce the old full read.
+$userLimit    = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $userOffset";
+$loanLimit    = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $loanOffset";
+$paymentLimit = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $paymentOffset";
+
+$users = $pdo->query("SELECT user_id, name, email, role FROM users ORDER BY user_id ASC $userLimit")->fetchAll();
 
 $loans = $pdo->query("
     SELECT l.loan_id, u.name AS user_name, l.movie_title, l.start_date, l.end_date, l.price 
     FROM loans l
     LEFT JOIN users u ON l.user_id = u.user_id
     ORDER BY l.loan_id DESC
+    $loanLimit
 ")->fetchAll();
 
 $payments = $pdo->query("
@@ -65,7 +105,23 @@ $payments = $pdo->query("
     FROM payments p
     LEFT JOIN users u ON p.user_id = u.user_id
     ORDER BY p.payment_id DESC
+    $paymentLimit
 ")->fetchAll();
+
+/* Helper to render a pager that preserves the other two lists' page params. */
+function admin_pager(string $param, int $cur, int $pages, array $others): string {
+    if ($pages <= 1) return '';
+    $base = function (int $p) use ($param, $others) {
+        $q = array_merge($others, [$param => $p]);
+        return '?' . http_build_query($q);
+    };
+    $html = '<div class="pagination">';
+    if ($cur > 1)      $html .= '<a class="btn btn-ghost btn-small" href="' . e($base($cur - 1)) . '">&laquo; Prev</a>';
+    $html .= '<span class="muted">Page ' . $cur . ' of ' . $pages . '</span>';
+    if ($cur < $pages) $html .= '<a class="btn btn-ghost btn-small" href="' . e($base($cur + 1)) . '">Next &raquo;</a>';
+    $html .= '</div>';
+    return $html;
+}
 
 page_header('Admin Management');
 ?>
@@ -107,6 +163,8 @@ page_header('Admin Management');
             <?php endforeach; ?>
         </tbody>
     </table>
+    <p class="muted"><?= number_format($userTotal) ?> users total</p>
+    <?= admin_pager('up', $userPage, $userPages, ['lp' => $loanPage, 'pp' => $paymentPage]) ?>
 
     <h2 style="margin-top: 2rem;">Manage Loans</h2>
     <table class="table" style="font-size: 0.9rem;">
@@ -155,6 +213,8 @@ page_header('Admin Management');
             <?php endforeach; ?>
         </tbody>
     </table>
+    <p class="muted"><?= number_format($loanTotal) ?> loans total</p>
+    <?= admin_pager('lp', $loanPage, $loanPages, ['up' => $userPage, 'pp' => $paymentPage]) ?>
 
     <h2 style="margin-top: 2rem;">Payment Records</h2>
     <table class="table">
@@ -183,6 +243,8 @@ page_header('Admin Management');
             <?php endif; ?>
         </tbody>
     </table>
+    <p class="muted"><?= number_format($paymentTotal) ?> payments total</p>
+    <?= admin_pager('pp', $paymentPage, $paymentPages, ['up' => $userPage, 'lp' => $loanPage]) ?>
 </div>
 
 <?php page_footer(); ?>

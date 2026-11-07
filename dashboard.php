@@ -6,22 +6,40 @@ $pdo = db();
 
 $search = trim((string)($_GET['q'] ?? ''));
 
-// Fetch loans and associated payment methods
+/* -------- Pagination --------
+ * Without a LIMIT this loads every loan for the user. For a user with many
+ * loans that is a large, slow read and an unwieldy page. We page the results
+ * and, crucially, the WHERE user_id + ORDER BY start_date is now served by the
+ * composite index idx_loans_user_startdate (no filesort).
+ */
+$perPage = 20;
+$page    = max(1, (int)($_GET['page'] ?? 1));
+$offset  = ($page - 1) * $perPage;
+
+// Shared WHERE clause + params for both the COUNT and the data query.
+$where  = 'WHERE l.user_id = ?';
+$params = [$user['user_id']];
+if ($search !== '') {
+    $where   .= ' AND l.movie_title LIKE ?';
+    $params[] = '%' . $search . '%'; // leading wildcard: cannot use a B-tree index
+}
+
+// Total rows (for page count). Counts loans only; no join needed.
+$countSql  = "SELECT COUNT(*) FROM loans l $where";
+$countStmt = $pdo->prepare($countSql);
+$countStmt->execute($params);
+$totalLoans = (int)$countStmt->fetchColumn();
+$totalPages = max(1, (int)ceil($totalLoans / $perPage));
+
+// Page of results. LIMIT/OFFSET are cast ints inlined safely (not user text).
 $sql = "
     SELECT l.loan_id, l.movie_title, l.start_date, l.end_date, l.price, p.payment_type 
     FROM loans l
     JOIN payments p ON l.payment_id = p.payment_id
-    WHERE l.user_id = ?
+    $where
+    ORDER BY l.start_date DESC
+    LIMIT $perPage OFFSET $offset
 ";
-$params = [$user['user_id']];
-
-if ($search !== '') {
-    $sql .= " AND l.movie_title LIKE ?";
-    $params[] = '%' . $search . '%'; // Wildcards for partial matches
-}
-
-$sql .= " ORDER BY l.start_date DESC";
-
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $loans = $stmt->fetchAll();
@@ -69,6 +87,19 @@ page_header('My Dashboard');
                 <?php endforeach; ?>
             </tbody>
         </table>
+
+        <?php if ($totalPages > 1): ?>
+            <?php $qs = $search !== '' ? '&q=' . urlencode($search) : ''; ?>
+            <div class="pagination">
+                <?php if ($page > 1): ?>
+                    <a href="?page=<?= $page - 1 ?><?= $qs ?>" class="btn btn-ghost">&laquo; Previous</a>
+                <?php endif; ?>
+                <span class="muted">Page <?= $page ?> of <?= $totalPages ?> (<?= number_format($totalLoans) ?> loans)</span>
+                <?php if ($page < $totalPages): ?>
+                    <a href="?page=<?= $page + 1 ?><?= $qs ?>" class="btn btn-ghost">Next &raquo;</a>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
     <?php endif; ?>
 </div>
 

@@ -55,8 +55,8 @@ the index and forces an in-memory sort.
 ### Run order (after any data load / re-seed)
 
 ```bash
-php migrate_movie_fields.php --verify   # backfill derived fields (idempotent)
-php create_indexes.php                  # create the three indexes (idempotent)
+php tools/migrate_movie_fields.php --verify   # backfill derived fields (idempotent)
+php tools/create_indexes.php                  # create the three indexes (idempotent)
 ```
 
 Both scripts are safe to re-run; they recompute / no-op rather than duplicate.
@@ -78,10 +78,10 @@ migration and the indexed `find()` sorts after.
 
 ```bash
 # before indexing (original data/queries):
-BENCHMARK_OUT=~/benchmark_results.md php benchmark.php before
+BENCHMARK_OUT=~/benchmark_results.md php tools/benchmark.php before
 
 # after migrate + create_indexes + index.php switch:
-BENCHMARK_OUT=~/benchmark_results.md php benchmark.php after
+BENCHMARK_OUT=~/benchmark_results.md php tools/benchmark.php after
 ```
 
 Results append to the file named by `BENCHMARK_OUT` (defaults to a writable
@@ -215,3 +215,108 @@ Reading the numbers honestly:
 - `index.php` search (regex `$or` across title/overview/genres) still scans to
   match, since a regex filter cannot use these sort indexes. A MongoDB text
   index (or Atlas Search) would be the enhancement there.
+
+---
+
+## MySQL Indexing & Pagination
+
+The relational side (`users`, `loans`, `payments`) stores accounts and rental
+records. Unlike the movie catalogue, most useful single-column indexes already
+existed — InnoDB auto-creates them for the foreign keys, and `users.email` is
+already `UNIQUE`. So MySQL optimization here is about two specific things a plain
+FK index does not cover: a **composite index** for a filter-plus-sort query, and
+**pagination** for queries that return everything.
+
+Benchmarked on ~50,000 loans / 50,000 payments spread across ~1,000 users
+(seeded via `seed_data.php`). Measurement mirrors the MongoDB side:
+`EXPLAIN FORMAT=JSON` for the plan (`mysql_benchmark.php`) plus browser
+Navigation Timing for page-level numbers.
+
+### Already-optimal (no change)
+
+| Query | Why it is already fine |
+|---|---|
+| `login` / `register`: `users WHERE email = ?` | `email` is a `UNIQUE` index |
+| `current_user`: `users WHERE user_id = ?` | primary key |
+| `receipt`: `loans WHERE payment_id = ?` | FK index `idx_loans_payment`; EXPLAIN shows a 1-row lookup, so no composite index was added |
+| JOINs on `payment_id` / `user_id` | FK indexes already present |
+
+### Optimization 1 — composite index for the user dashboard
+
+`dashboard.php` runs:
+
+```sql
+SELECT ... FROM loans l JOIN payments p ON l.payment_id = p.payment_id
+WHERE l.user_id = ? ORDER BY l.start_date DESC
+```
+
+The existing `idx_loans_user` filters by user but does **not** cover the
+`ORDER BY start_date`, so MySQL did a separate filesort. The composite index
+`loans(user_id, start_date)` (created by `create_mysql_indexes.php`) covers both:
+
+| | Before | After |
+|---|---|---|
+| Index chosen | `idx_loans_user` | `idx_loans_user_startdate` |
+| `Extra` (EXPLAIN) | **Using filesort** | **(no filesort)** |
+| wall median | ~4.95 ms | ~5.8 ms (within noise) |
+
+The plan improvement is the real result: the filesort is eliminated. The
+wall-clock is unchanged because the test user has ~1,000 loans and the sort was
+already sub-millisecond against a ~5 ms query floor — the index's benefit scales
+with the number of rows a user has, so it matters more as data grows. (This is
+the same honest pattern as the MongoDB projection: a clear structural win that
+the clock does not show at this scale.)
+
+> MySQL stores the index `start_date` ascending but serves the `DESC` sort via a
+> backward range scan, so one index covers both sort directions.
+
+### Optimization 2 — pagination (the bigger win)
+
+`admin_dashboard.php` showed **all** users, loans, and payments with no `LIMIT`.
+With 50k rows this is a problem no index can fix — the query returns everything,
+so there is nothing to narrow. The fix is `LIMIT`-based pagination (25 rows per
+list, independent page params). Pagination was also added to the user dashboard
+(20 per page).
+
+Admin dashboard, before (`?nolimit=1` toggle) vs after (paginated):
+
+| Measurement | Before (no LIMIT) | After (LIMIT 25) |
+|---|---:|---:|
+| Server query work (COUNT + page query) | ~169 ms | **13.9 ms** |
+| TTFB (client) | 647 ms | 218 ms |
+| DOM ready (client) | never completed | 596 ms |
+| Full load (client) | never completed | 727 ms |
+| Rows rendered | ~99,000 (loans + payments) | 50 |
+
+The "before" page **never finished rendering** — the server responded, but the
+browser could not build a DOM of ~99k table rows (each with inline edit forms)
+in any usable time. Pagination turned an unusable page into one that loads in
+well under a second. This is the clearest MySQL win: indexes could not help a
+full-table read, but bounding the result set with `LIMIT` did.
+
+### Scripts & run order (MySQL)
+
+```bash
+php tools/seed_data.php                                   # seed benchmarkable data (one-time)
+BENCHMARK_OUT=~/mysql_benchmark_results.md php tools/mysql_benchmark.php before
+php tools/create_mysql_indexes.php                        # add the composite index
+BENCHMARK_OUT=~/mysql_benchmark_results.md php tools/mysql_benchmark.php after
+```
+
+`create_mysql_indexes.php` is idempotent (checks before creating). It requires a
+DB account with the `INDEX` privilege — the app user may not have it, so the
+index may need to be created by an admin account; the script then just reports
+it already exists.
+
+### Notes / possible follow-ups (MySQL)
+
+- The dashboard search (`movie_title LIKE '%term%'`) has a leading wildcard, so
+  it cannot use a B-tree index — the same limitation as the MongoDB regex
+  search. A `FULLTEXT` index on `movie_title` would be the enhancement.
+- `COUNT(*)` for page totals is ~14 ms on a 50k table here; at much larger scale
+  a cached or approximate count would avoid counting on every page load.
+- Deep `OFFSET` pagination (e.g. page 2000) is linear in the offset; keyset
+  pagination (`WHERE loan_id < lastSeen`) would keep deep pages fast.
+- Seed accounts are hashed with bcrypt at a reduced cost (`SEED_BCRYPT_COST`)
+  purely so seeding is fast; real accounts via `register.php` use PHP's default
+  (stronger) cost.

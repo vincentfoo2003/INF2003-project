@@ -60,13 +60,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
  */
 $perPage = 25;
 
-/*
- * TEMPORARY BENCHMARK TOGGLE — remove after capturing the pagination "before".
- * ?nolimit=1 reverts to the original behaviour: fetch ALL rows with no LIMIT,
- * so the browser can time the pre-pagination state on the same deployed file.
- */
-$NOLIMIT = (($_GET['nolimit'] ?? '') === '1');
-
 $userPage    = max(1, (int)($_GET['up'] ?? 1));
 $loanPage    = max(1, (int)($_GET['lp'] ?? 1));
 $paymentPage = max(1, (int)($_GET['pp'] ?? 1));
@@ -75,45 +68,98 @@ $userOffset    = ($userPage - 1) * $perPage;
 $loanOffset    = ($loanPage - 1) * $perPage;
 $paymentOffset = ($paymentPage - 1) * $perPage;
 
-// Totals for page counts.
-$userTotal    = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
-$loanTotal    = (int)$pdo->query("SELECT COUNT(*) FROM loans")->fetchColumn();
-$paymentTotal = (int)$pdo->query("SELECT COUNT(*) FROM payments")->fetchColumn();
+/* Per-list search terms (independent). */
+$userSearch    = trim((string)($_GET['uq'] ?? ''));
+$loanSearch    = trim((string)($_GET['lq'] ?? ''));
+$paymentSearch = trim((string)($_GET['pq'] ?? ''));
+
+/* Build WHERE clause + params for each list from its search term.
+ * LIKE with a leading wildcard cannot use a B-tree index, so these scan —
+ * acceptable for an admin tool, and the same limitation noted elsewhere. */
+$userWhere = ''; $userParams = [];
+if ($userSearch !== '') {
+    $userWhere = 'WHERE u.name LIKE ? OR u.email LIKE ?';
+    $like = '%' . $userSearch . '%';
+    $userParams = [$like, $like];
+}
+
+$loanWhere = ''; $loanParams = [];
+if ($loanSearch !== '') {
+    $loanWhere = 'WHERE l.movie_title LIKE ? OR u.name LIKE ?';
+    $like = '%' . $loanSearch . '%';
+    $loanParams = [$like, $like];
+}
+
+$paymentWhere = ''; $paymentParams = [];
+if ($paymentSearch !== '') {
+    $paymentWhere = 'WHERE u.name LIKE ? OR p.payment_type LIKE ?';
+    $like = '%' . $paymentSearch . '%';
+    $paymentParams = [$like, $like];
+}
+
+/* Totals for page counts (respect the active search). */
+$uc = $pdo->prepare("SELECT COUNT(*) FROM users u $userWhere");
+$uc->execute($userParams); $userTotal = (int)$uc->fetchColumn();
+
+$lc = $pdo->prepare("SELECT COUNT(*) FROM loans l LEFT JOIN users u ON l.user_id = u.user_id $loanWhere");
+$lc->execute($loanParams); $loanTotal = (int)$lc->fetchColumn();
+
+$pc = $pdo->prepare("SELECT COUNT(*) FROM payments p LEFT JOIN users u ON p.user_id = u.user_id $paymentWhere");
+$pc->execute($paymentParams); $paymentTotal = (int)$pc->fetchColumn();
 
 $userPages    = max(1, (int)ceil($userTotal / $perPage));
 $loanPages    = max(1, (int)ceil($loanTotal / $perPage));
 $paymentPages = max(1, (int)ceil($paymentTotal / $perPage));
 
 // Fetch one page of each list (LIMIT/OFFSET are cast ints, not user text).
-// With ?nolimit=1 the LIMIT/OFFSET are dropped to reproduce the old full read.
-$userLimit    = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $userOffset";
-$loanLimit    = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $loanOffset";
-$paymentLimit = $NOLIMIT ? '' : "LIMIT $perPage OFFSET $paymentOffset";
+$userLimit    = "LIMIT $perPage OFFSET $userOffset";
+$loanLimit    = "LIMIT $perPage OFFSET $loanOffset";
+$paymentLimit = "LIMIT $perPage OFFSET $paymentOffset";
 
-$users = $pdo->query("SELECT user_id, name, email, role FROM users ORDER BY user_id ASC $userLimit")->fetchAll();
+/* Users: admins first (role = 'admin' sorts before 'user'), then by id.
+ * "role = 'admin'" yields 1 for admins, 0 for users; DESC puts admins on top. */
+$us = $pdo->prepare("
+    SELECT u.user_id, u.name, u.email, u.role
+    FROM users u
+    $userWhere
+    ORDER BY (u.role = 'admin') DESC, u.user_id ASC
+    $userLimit
+");
+$us->execute($userParams);
+$users = $us->fetchAll();
 
-$loans = $pdo->query("
+$ls = $pdo->prepare("
     SELECT l.loan_id, u.name AS user_name, l.movie_title, l.start_date, l.end_date, l.price 
     FROM loans l
     LEFT JOIN users u ON l.user_id = u.user_id
+    $loanWhere
     ORDER BY l.loan_id DESC
     $loanLimit
-")->fetchAll();
+");
+$ls->execute($loanParams);
+$loans = $ls->fetchAll();
 
-$payments = $pdo->query("
+$ps = $pdo->prepare("
     SELECT p.payment_id, u.name AS user_name, p.cost, p.payment_type, p.created_at 
     FROM payments p
     LEFT JOIN users u ON p.user_id = u.user_id
+    $paymentWhere
     ORDER BY p.payment_id DESC
     $paymentLimit
-")->fetchAll();
+");
+$ps->execute($paymentParams);
+$payments = $ps->fetchAll();
 
-/* Helper to render a pager that preserves the other two lists' page params. */
+/* Helper: render a pager that preserves the OTHER lists' page params AND all
+ * three search terms, so navigating or searching one list leaves the rest. */
 function admin_pager(string $param, int $cur, int $pages, array $others): string {
     if ($pages <= 1) return '';
+    // carry current search terms through pagination links
+    foreach (['uq', 'lq', 'pq'] as $sq) {
+        if (isset($_GET[$sq]) && $_GET[$sq] !== '') $others[$sq] = (string)$_GET[$sq];
+    }
     $base = function (int $p) use ($param, $others) {
-        $q = array_merge($others, [$param => $p]);
-        return '?' . http_build_query($q);
+        return '?' . http_build_query(array_merge($others, [$param => $p]));
     };
     $html = '<div class="pagination">';
     if ($cur > 1)      $html .= '<a class="btn btn-ghost btn-small" href="' . e($base($cur - 1)) . '">&laquo; Prev</a>';
@@ -123,6 +169,30 @@ function admin_pager(string $param, int $cur, int $pages, array $others): string
     return $html;
 }
 
+/* Helper: a small search form for one list. Preserves other lists' search
+ * terms as hidden fields so searching one doesn't clear the others. */
+function admin_search_form(string $param, string $value, string $placeholder): string {
+    $hidden = '';
+    foreach (['uq', 'lq', 'pq'] as $sq) {
+        if ($sq !== $param && isset($_GET[$sq]) && $_GET[$sq] !== '') {
+            $hidden .= '<input type="hidden" name="' . $sq . '" value="' . e((string)$_GET[$sq]) . '">';
+        }
+    }
+    $clear = $value !== ''
+        ? '<a class="btn btn-small btn-ghost" href="?' . e(http_build_query(array_filter([
+              'uq' => $param === 'uq' ? '' : ($_GET['uq'] ?? ''),
+              'lq' => $param === 'lq' ? '' : ($_GET['lq'] ?? ''),
+              'pq' => $param === 'pq' ? '' : ($_GET['pq'] ?? ''),
+          ]))) . '">Clear</a>'
+        : '';
+    return '<form method="get" action="admin_dashboard.php" class="filter-form" style="display:flex; gap:8px; margin:0 0 10px;">'
+         . $hidden
+         . '<input type="search" name="' . $param . '" value="' . e($value) . '" placeholder="' . e($placeholder) . '" style="padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius); min-width:240px;">'
+         . '<button type="submit" class="btn btn-small">Search</button>'
+         . $clear
+         . '</form>';
+}
+
 page_header('Admin Management');
 ?>
 
@@ -130,6 +200,7 @@ page_header('Admin Management');
     <h1>Admin Dashboard</h1>
 
     <h2>Manage Users</h2>
+    <?= admin_search_form('uq', $userSearch, 'Search name or email...') ?>
     <table class="table">
         <thead>
             <tr>
@@ -141,6 +212,9 @@ page_header('Admin Management');
             </tr>
         </thead>
         <tbody>
+            <?php if (empty($users)): ?>
+                <tr><td colspan="5" class="empty">No users match your search.</td></tr>
+            <?php endif; ?>
             <?php foreach ($users as $u): ?>
                 <tr>
                     <td><?= e($u['user_id']) ?></td>
@@ -167,6 +241,7 @@ page_header('Admin Management');
     <?= admin_pager('up', $userPage, $userPages, ['lp' => $loanPage, 'pp' => $paymentPage]) ?>
 
     <h2 style="margin-top: 2rem;">Manage Loans</h2>
+    <?= admin_search_form('lq', $loanSearch, 'Search movie title or user...') ?>
     <table class="table" style="font-size: 0.9rem;">
         <thead>
             <tr>
@@ -178,6 +253,9 @@ page_header('Admin Management');
             </tr>
         </thead>
         <tbody>
+            <?php if (empty($loans)): ?>
+                <tr><td colspan="5" class="empty">No loans match your search.</td></tr>
+            <?php endif; ?>
             <?php foreach ($loans as $l): ?>
                 <tr>
                     <td><?= e($l['loan_id']) ?></td>
@@ -217,6 +295,7 @@ page_header('Admin Management');
     <?= admin_pager('lp', $loanPage, $loanPages, ['up' => $userPage, 'pp' => $paymentPage]) ?>
 
     <h2 style="margin-top: 2rem;">Payment Records</h2>
+    <?= admin_search_form('pq', $paymentSearch, 'Search user or payment method...') ?>
     <table class="table">
         <thead>
             <tr>

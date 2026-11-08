@@ -97,10 +97,35 @@ foreach ($indexes as $ix) {
 
 /* --------------------------- list current ----------------------------- */
 echo str_repeat('-', 60) . "\n";
-echo "Indexes now on the collection:\n";
+echo "Indexes now on the movies collection:\n";
 foreach ($coll->listIndexes() as $index) {
     $key = json_encode($index->getKey(), JSON_UNESCAPED_SLASHES);
     printf("  %-32s key=%s\n", $index->getName(), $key);
+}
+
+/* ------------------ movie_reviews collection index -------------------- */
+/*
+ * movie.php's reviews section runs: find({title: ?}).sort({date: -1}).
+ * The compound index { title: 1, date: -1 } serves the equality filter on
+ * title AND the date sort in one index (ESR: Equality then Sort), so the
+ * query neither scans the collection nor does an in-memory sort.
+ */
+echo str_repeat('-', 60) . "\n";
+try {
+    $reviews = getMongoClient()->selectDatabase('inf2003-moviedb')->selectCollection('movie_reviews');
+    echo "Creating title_1_date_-1 on movie_reviews (movie.php reviews lookup)\n";
+    $start = hrtime(true);
+    $created = $reviews->createIndex(['title' => 1, 'date' => -1], ['name' => 'title_1_date_-1']);
+    printf("  -> ok: %s  (%.0f ms)\n", $created, (hrtime(true) - $start) / 1e6);
+
+    echo "Indexes now on the movie_reviews collection:\n";
+    foreach ($reviews->listIndexes() as $index) {
+        $key = json_encode($index->getKey(), JSON_UNESCAPED_SLASHES);
+        printf("  %-32s key=%s\n", $index->getName(), $key);
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, "  -> movie_reviews index FAILED: " . $e->getMessage() . "\n");
+    // non-fatal: the movie indexes above still succeeded
 }
 
 echo str_repeat('=', 60) . "\n";

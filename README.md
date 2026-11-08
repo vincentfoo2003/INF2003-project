@@ -132,6 +132,43 @@ is small next to the ~155 ms Atlas round-trip, so the projection's benefit here
 is **bandwidth, not latency**. The saving scales with page size, result count,
 slower client networks, and request volume.
 
+### Movie reviews (second collection) + compound index
+
+The movie detail page (`movie.php`) shows reviews from a separate MongoDB
+collection, `movie_reviews` (~427,000 documents). Each review references its
+movie by the `title` string, so `movie.php` runs:
+
+```php
+$reviewsCol->find(['title' => $title], ['sort' => ['date' => -1], 'limit' => 20]);
+```
+
+That is an equality filter on `title` plus a sort on `date` — a textbook case
+for a compound index following the ESR rule (Equality, then Sort). The index
+`movie_reviews { title: 1, date: -1 }` (added by `tools/create_indexes.php`)
+serves both the filter and the sort from the index.
+
+#### Measured result (427,335 reviews, most-reviewed title)
+
+| | Before (no index) | After (`title_1_date_-1`) |
+|---|---|---|
+| Plan | COLLSCAN + in-memory SORT | IXSCAN |
+| Documents examined | 427,335 (whole collection) | 20 |
+| Server exec time | ~153 ms | ~1 ms |
+| Wall-clock median | ~310 ms | ~157 ms |
+
+This is the clearest indexing win in the project. Because the collection is
+large (~427k docs), the improvement shows at **both** layers: server execution
+dropped roughly 150x (the full collection scan + in-memory sort disappeared,
+examining 20 documents instead of 427,335), and even the network-dominated
+wall-clock halved — the ~150 ms of real query work was removed, leaving only the
+Atlas round-trip. Unlike the smaller before/after cases where timing was noise,
+here the dataset is big enough that the latency win is real end-to-end.
+
+> The reviews block in `movie.php` is wrapped in its own try/catch, so a reviews
+> query failure degrades to "no reviews" rather than breaking the movie page.
+> Reviews are matched by exact `title` string (the only link the data provides),
+> so the match is case- and whitespace-sensitive.
+
 ### Measuring a real record: server-side vs client-side
 
 The two layers are measured with different tools, because a CLI script has no

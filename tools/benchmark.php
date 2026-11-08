@@ -189,6 +189,10 @@ printf("Query mode       : %s\n", $indexedMode ? 'INDEXED find() sorts' : 'ORIGI
 printf("Phase label      : %s\n", $label);
 printf("Timed runs       : %d (plus 1 warm-up, discarded)\n", $RUNS);
 printf("Deep page tested : %d of %d (skip %s)\n", $deepPage, $totalPages, number_format($deepSkip));
+try {
+    $revCount = mongo_db_collection('movie_reviews')->countDocuments([]);
+    printf("movie_reviews    : %s documents\n", number_format($revCount));
+} catch (Throwable $e) { /* reviews optional */ }
 echo str_repeat('-', 68) . "\n";
 
 $rows = []; // collected for the report
@@ -252,6 +256,39 @@ if ($sample !== null) {
     ), ['verbosity' => 'executionStats']);
     $run = fn() => (mongo_find_one(['_id' => $sid]) !== null) ? 1 : 0;
     $rows[] = ['findOne by _id', summarize_explain($explain), time_runs($run, $RUNS)];
+}
+
+/* ---- Workload 6: movie_reviews lookup (movie.php reviews section) ----
+ * The review query filters by title and sorts by date desc. This is the
+ * query the compound index { title: 1, date: -1 } optimizes. We pick the
+ * most-reviewed title so the filter returns a meaningful set, and we measure
+ * the exact find() movie.php runs (sort date desc, limit 20). before/after is
+ * driven by whether that index exists on movie_reviews — independent of the
+ * movies collection's state. */
+$reviewsCol = mongo_db_collection('movie_reviews');
+$reviewTotal = $reviewsCol->countDocuments([]);
+if ($reviewTotal > 0) {
+    // most-reviewed title → representative, selective filter
+    $topTitle = null;
+    $topAgg = $reviewsCol->aggregate([
+        ['$group' => ['_id' => '$title', 'n' => ['$sum' => 1]]],
+        ['$sort' => ['n' => -1]],
+        ['$limit' => 1],
+    ])->toArray();
+    if (!empty($topAgg)) $topTitle = $topAgg[0]['_id'];
+
+    if ($topTitle !== null) {
+        $explain = $reviewsCol->explain(new MongoDB\Operation\Find(
+            'inf2003-moviedb', 'movie_reviews',
+            ['title' => $topTitle],
+            ['sort' => ['date' => -1], 'limit' => 20]
+        ), ['verbosity' => 'executionStats']);
+        $run = fn() => count($reviewsCol->find(
+            ['title' => $topTitle],
+            ['sort' => ['date' => -1], 'limit' => 20]
+        )->toArray());
+        $rows[] = ['movie_reviews: title + sort date (movie.php)', summarize_explain($explain), time_runs($run, $RUNS)];
+    }
 }
 
 /*

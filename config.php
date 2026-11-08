@@ -64,13 +64,19 @@ function getMongoClient(): Client
     return new Client($uri);
 }
 
+/** Return any collection in the movie database, cached per name. */
+function mongo_db_collection(string $name): \MongoDB\Collection
+{
+    static $cache = [];
+    if (!isset($cache[$name])) {
+        $cache[$name] = getMongoClient()->selectDatabase('inf2003-moviedb')->selectCollection($name);
+    }
+    return $cache[$name];
+}
+
 function mongo_collection(): \MongoDB\Collection
 {
-    static $collection = null;
-    if ($collection === null) {
-        $collection = getMongoClient()->selectDatabase('inf2003-moviedb')->selectCollection('movies');
-    }
-    return $collection;
+    return mongo_db_collection('movies');
 }
 
 function mongo_find(array $filter, array $options = []): array

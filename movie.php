@@ -23,6 +23,41 @@ $movieId = (string)$movie['_id'];
 $inCart = in_array($movieId, cart_ids(), true);
 $placeholder = placeholder_poster();
 
+/*
+ * Reviews live in the movie_reviews collection and reference the movie by
+ * its title string (there is no movie _id on the review). We fetch the
+ * newest reviews for this title. A failure here must not break the page, so
+ * it's isolated in its own try/catch.
+ */
+$reviews = [];
+$reviewCount = 0;
+$avgUserRating = null;
+try {
+    $reviewsCol = mongo_db_collection('movie_reviews');
+    $title = (string)($movie['title'] ?? '');
+    if ($title !== '') {
+        $reviewCount = $reviewsCol->countDocuments(['title' => $title]);
+        $reviews = $reviewsCol->find(
+            ['title' => $title],
+            ['sort' => ['date' => -1], 'limit' => 20]
+        )->toArray();
+
+        // Average user rating across ALL reviews for this title (not just the page).
+        if ($reviewCount > 0) {
+            $agg = $reviewsCol->aggregate([
+                ['$match' => ['title' => $title]],
+                ['$group' => ['_id' => null, 'avg' => ['$avg' => '$userRating']]],
+            ])->toArray();
+            if (!empty($agg) && isset($agg[0]['avg'])) {
+                $avgUserRating = (float)$agg[0]['avg'];
+            }
+        }
+    }
+} catch (Throwable $e) {
+    error_log('movie.php reviews: ' . $e->getMessage());
+    $reviews = [];
+}
+
 // Safely parse production companies (TMDB often stores this as a JSON string)
 $companies = [];
 if (!empty($movie['production_companies'])) {
@@ -135,6 +170,39 @@ page_header((string)$movie['title']);
         <?php endif; ?>
     </div>
 </div>
+
+<section class="reviews" style="margin-top: 32px;">
+    <h2 style="display:flex; align-items:center; gap:12px;">
+        Reviews
+        <span class="muted" style="font-size: 0.9rem; font-weight: normal;">
+            <?php if ($reviewCount > 0): ?>
+                <?= number_format($reviewCount) ?> review<?= $reviewCount === 1 ? '' : 's' ?>
+                <?php if ($avgUserRating !== null): ?>
+                    &middot; average <?= e(number_format($avgUserRating, 1)) ?>/10
+                <?php endif; ?>
+            <?php endif; ?>
+        </span>
+    </h2>
+
+    <?php if (empty($reviews)): ?>
+        <p class="empty">No reviews yet for this movie.</p>
+    <?php else: ?>
+        <?php if ($reviewCount > count($reviews)): ?>
+            <p class="muted">Showing the <?= count($reviews) ?> most recent of <?= number_format($reviewCount) ?>.</p>
+        <?php endif; ?>
+        <ul style="list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:12px;">
+            <?php foreach ($reviews as $rev): ?>
+                <li style="background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; box-shadow:0 1px 2px rgba(0,0,0,0.05);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
+                        <span class="rating">&#9733; <?= e((string)(int)($rev['userRating'] ?? 0)) ?>/10</span>
+                        <span class="muted" style="font-size:0.85rem;"><?= e((string)($rev['date'] ?? '')) ?></span>
+                    </div>
+                    <p style="margin:0; line-height:1.5;"><?= e((string)($rev['reviewContent'] ?? '')) ?></p>
+                </li>
+            <?php endforeach; ?>
+        </ul>
+    <?php endif; ?>
+</section>
 
 <?php poster_loader_script(); ?>
 <?php page_footer(); ?>

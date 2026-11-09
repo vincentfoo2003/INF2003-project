@@ -11,6 +11,11 @@ const MOVIE_PRICE  = 1.00;
 const OMDB_API_KEY = '27c6bf31';
 const OMDB_URL     = 'https://www.omdbapi.com/';
 
+/* Streaming: put <movie_id>.mp4 files in VIDEO_DIR; movies without a file play DEMO_VIDEO_URL.
+   DEMO_VIDEO_URL is a placeholder until the real movie is hardcoded. */
+const VIDEO_DIR      = __DIR__ . '/videos';
+const DEMO_VIDEO_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+
 if (session_status() === PHP_SESSION_NONE) {
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
     session_set_cookie_params([
@@ -210,6 +215,29 @@ function cart_total(array $movies): float {
     return round(count($movies) * MOVIE_PRICE, 2);
 }
 
+/* Loans */
+function loan_status(array $loan): string {
+    $today = date('Y-m-d');
+    if ((string)$loan['start_date'] > $today) return 'upcoming';
+    if ((string)$loan['end_date'] < $today) return 'expired';
+    return 'active';
+}
+
+// Loans run through the whole of end_date, so access stops at the following midnight
+function loan_ends_at(array $loan): int {
+    return (int)strtotime((string)$loan['end_date'] . ' +1 day');
+}
+
+function active_loan(int $userId, string $movieId): ?array {
+    $today = date('Y-m-d');
+    $stmt  = db()->prepare('SELECT loan_id, movie_id, movie_title, start_date, end_date FROM loans
+                            WHERE user_id = ? AND movie_id = ? AND start_date <= ? AND end_date >= ?
+                            ORDER BY end_date DESC LIMIT 1');
+    $stmt->execute([$userId, $movieId, $today, $today]);
+    $row = $stmt->fetch();
+    return $row === false ? null : $row;
+}
+
 /* =========================================================
    Posters (OMDb)
    ========================================================= */
@@ -330,5 +358,15 @@ function page_header(string $title): void {
 <?php if ($flash !== null): ?>
     <div class="alert alert-<?= e($flash['type']) ?>"><?= e($flash['msg']) ?></div>
 <?php endif; ?>
+    <?php
+}
+
+function page_footer(): void {
+    ?>
+</main>
+<footer class="site-footer">
+    <div class="wrap"><p>MovieShare demo &middot; every rental is $<?= number_format(MOVIE_PRICE, 2) ?> &middot; posters via OMDb API</p></div>
+</footer>
+</body></html>
     <?php
 }

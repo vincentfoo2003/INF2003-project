@@ -33,7 +33,7 @@ $totalPages = max(1, (int)ceil($totalLoans / $perPage));
 
 // Page of results. LIMIT/OFFSET are cast ints inlined safely (not user text).
 $sql = "
-    SELECT l.loan_id, l.movie_title, l.start_date, l.end_date, l.price, p.payment_type 
+    SELECT l.loan_id, l.movie_id, l.movie_title, l.start_date, l.end_date, l.price, p.payment_type
     FROM loans l
     JOIN payments p ON l.payment_id = p.payment_id
     $where
@@ -73,6 +73,7 @@ page_header('My Dashboard');
                     <th>Rental Period</th>
                     <th>Price Paid</th>
                     <th>Payment Method</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -83,6 +84,16 @@ page_header('My Dashboard');
                         <td><?= e($loan['start_date']) ?> to <?= e($loan['end_date']) ?></td>
                         <td>$<?= number_format($loan['price'], 2) ?></td>
                         <td><?= e(ucfirst($loan['payment_type'])) ?></td>
+                        <td>
+                            <?php $status = loan_status($loan); ?>
+                            <?php if ($status === 'active'): ?>
+                                <a class="btn btn-small" href="watch.php?id=<?= e($loan['movie_id']) ?>">&#9654; Watch Movie</a>
+                            <?php elseif ($status === 'upcoming'): ?>
+                                <span class="badge badge-upcoming">Starts <?= e(date('j M', strtotime((string)$loan['start_date']))) ?></span>
+                            <?php else: ?>
+                                <span class="badge badge-expired">Rental ended</span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endforeach; ?>
             </tbody>

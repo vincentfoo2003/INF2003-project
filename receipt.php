@@ -30,7 +30,7 @@ page_header('Receipt');
     <h2>Your rentals</h2>
     <table class="table">
         <thead>
-            <tr><th>Movie</th><th>Loan start</th><th>Loan end</th><th>Price</th></tr>
+            <tr><th>Movie</th><th>Loan start</th><th>Loan end</th><th>Price</th><th></th></tr>
         </thead>
         <tbody>
         <?php foreach ($loans as $loan): ?>
@@ -39,13 +39,21 @@ page_header('Receipt');
                 <td><?= e(date('j M Y', strtotime((string)$loan['start_date']))) ?></td>
                 <td><?= e(date('j M Y', strtotime((string)$loan['end_date']))) ?></td>
                 <td>$<?= number_format((float)$loan['price'], 2) ?></td>
+                <td>
+                    <?php if (loan_status($loan) === 'active'): ?>
+                        <a class="btn btn-small" href="watch.php?id=<?= e($loan['movie_id']) ?>">&#9654; Watch</a>
+                    <?php endif; ?>
+                </td>
             </tr>
         <?php endforeach; ?>
         </tbody>
         <tfoot>
-            <tr><th colspan="3">Total paid</th><th>$<?= number_format((float)$payment['cost'], 2) ?></th></tr>
+            <tr><th colspan="3">Total paid</th><th colspan="2">$<?= number_format((float)$payment['cost'], 2) ?></th></tr>
         </tfoot>
     </table>
-    <div class="actions" style="justify-content:flex-start"><a class="btn" href="index.php">Rent more movies</a></div>
+    <div class="actions" style="justify-content:flex-start">
+        <a class="btn" href="dashboard.php">My dashboard</a>
+        <a class="btn btn-ghost" href="index.php">Rent more movies</a>
+    </div>
 </div>
 <?php page_footer(); ?>

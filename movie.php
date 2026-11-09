@@ -21,6 +21,8 @@ if ($movie === null) {
 
 $movieId = (string)$movie['_id'];
 $inCart = in_array($movieId, cart_ids(), true);
+$user = current_user();
+$loan = $user !== null ? active_loan((int)$user['user_id'], $movieId) : null;
 $placeholder = placeholder_poster();
 
 /*
@@ -155,7 +157,17 @@ page_header((string)$movie['title']);
 
         <p class="price">Rental price: <strong>$<?= number_format(MOVIE_PRICE, 2) ?></strong></p>
 
-        <?php if ($inCart): ?>
+        <?php if ($loan === null && isset($_GET['expired'])): ?>
+            <div class="alert alert-info">Your rental of this movie has ended. Rent it again below to keep watching.</div>
+        <?php endif; ?>
+
+        <?php if ($loan !== null): ?>
+            <p class="in-cart">You're renting this movie until <?= e(date('j M Y', strtotime((string)$loan['end_date']))) ?>.</p>
+            <div class="actions" style="justify-content:flex-start">
+                <a class="btn" href="watch.php?id=<?= e($movieId) ?>">&#9654; Watch now</a>
+                <a class="btn btn-ghost" href="dashboard.php">My dashboard</a>
+            </div>
+        <?php elseif ($inCart): ?>
             <p class="in-cart">This movie is already in your cart.</p>
             <div class="actions" style="justify-content:flex-start">
                 <a class="btn" href="checkout.php">Go to checkout</a>

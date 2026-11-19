@@ -16,6 +16,14 @@ const OMDB_URL     = 'https://www.omdbapi.com/';
 const VIDEO_DIR      = __DIR__ . '/videos';
 const DEMO_VIDEO_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
 
+/* Google Cloud Storage: videos stream from this bucket via short-lived signed
+   URLs. GCS_VIDEO_OBJECT is used for every movie until per-movie objects exist.
+   Auth uses Application Default Credentials (the VM's service account, or a key
+   file pointed to by GOOGLE_APPLICATION_CREDENTIALS). */
+const GCS_BUCKET        = 'inf2003-bucket';
+const GCS_VIDEO_OBJECT  = 'placeholder.mp4';
+const GCS_URL_TTL       = 3600; // signed-URL lifetime in seconds (capped by rental end)
+
 if (session_status() === PHP_SESSION_NONE) {
     $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
     session_set_cookie_params([
@@ -236,6 +244,52 @@ function active_loan(int $userId, string $movieId): ?array {
     $stmt->execute([$userId, $movieId, $today, $today]);
     $row = $stmt->fetch();
     return $row === false ? null : $row;
+}
+
+/* =========================================================
+   Google Cloud Storage (signed video URLs)
+   ========================================================= */
+/**
+ * Build a short-lived V4 signed URL for a video object in GCS.
+ *
+ * Auth uses Application Default Credentials (the GCP VM's attached service
+ * account, or a key file via GOOGLE_APPLICATION_CREDENTIALS). With the VM's
+ * service account and no key file, signing is delegated to the IAM
+ * signBlob API, so the SA needs roles/iam.serviceAccountTokenCreator on
+ * itself plus read access to the bucket.
+ *
+ * $maxTimestamp caps the expiry so a URL can never outlive the rental: the
+ * effective lifetime is min(GCS_URL_TTL, time until rental end).
+ *
+ * Returns the signed URL string, or null on any failure (caller should fall
+ * back to DEMO_VIDEO_URL so playback still works in dev).
+ */
+function gcs_signed_video_url(string $object, ?int $maxTimestamp = null): ?string {
+    static $bucket = null;
+    try {
+        if ($bucket === null) {
+            // keyFilePath is honoured automatically if GOOGLE_APPLICATION_CREDENTIALS is set
+            $storage = new \Google\Cloud\Storage\StorageClient();
+            $bucket  = $storage->bucket(GCS_BUCKET);
+        }
+
+        // Effective TTL: never longer than the time left on the rental.
+        $ttl = GCS_URL_TTL;
+        if ($maxTimestamp !== null) {
+            $remaining = $maxTimestamp - time();
+            if ($remaining <= 0) return null;          // rental already over
+            $ttl = min($ttl, $remaining);
+        }
+
+        $url = $bucket->object($object)->signedUrl(
+            new \DateTime("+{$ttl} seconds"),
+            ['version' => 'v4']
+        );
+        return (string)$url;
+    } catch (Throwable $e) {
+        error_log('gcs_signed_video_url: ' . $e->getMessage());
+        return null;
+    }
 }
 
 /* =========================================================

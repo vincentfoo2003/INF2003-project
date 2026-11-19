@@ -1,5 +1,6 @@
 {
     "require": {
-        "mongodb/mongodb": "^2.5"
+        "mongodb/mongodb": "^2.5",
+        "google/cloud-storage": "^1.44"
     }
 }

@@ -147,22 +147,23 @@ for a compound index following the ESR rule (Equality, then Sort). The index
 `movie_reviews { title: 1, date: -1 }` (added by `tools/create_indexes.php`)
 serves both the filter and the sort from the index.
 
-#### Measured result (427,335 reviews, most-reviewed title)
+#### Measured result (990,586 reviews, most-reviewed title)
 
 | | Before (no index) | After (`title_1_date_-1`) |
 |---|---|---|
 | Plan | COLLSCAN + in-memory SORT | IXSCAN |
-| Documents examined | 427,335 (whole collection) | 20 |
-| Server exec time | ~153 ms | ~1 ms |
-| Wall-clock median | ~310 ms | ~157 ms |
+| Documents examined | 990,586 (whole collection) | 20 |
+| Server exec time | ~344 ms | ~0 ms |
+| Wall-clock median | ~557 ms | ~154 ms |
 
 This is the clearest indexing win in the project. Because the collection is
-large (~427k docs), the improvement shows at **both** layers: server execution
-dropped roughly 150x (the full collection scan + in-memory sort disappeared,
-examining 20 documents instead of 427,335), and even the network-dominated
-wall-clock halved — the ~150 ms of real query work was removed, leaving only the
-Atlas round-trip. Unlike the smaller before/after cases where timing was noise,
-here the dataset is big enough that the latency win is real end-to-end.
+large (~990k docs), the improvement shows at **both** layers: server execution
+dropped from ~344 ms to effectively 0 (the full collection scan + in-memory sort
+disappeared, examining 20 documents instead of 990,586), and the
+network-dominated wall-clock dropped ~3.6x — the ~344 ms of real query work was
+removed, leaving only the Atlas round-trip. Unlike the smaller before/after
+cases where timing was noise, here the dataset is big enough that the latency
+win is large end-to-end.
 
 > The reviews block in `movie.php` is wrapped in its own try/catch, so a reviews
 > query failure degrades to "no reviews" rather than breaking the movie page.
@@ -357,3 +358,70 @@ it already exists.
 - Seed accounts are hashed with bcrypt at a reduced cost (`SEED_BCRYPT_COST`)
   purely so seeding is fast; real accounts via `register.php` use PHP's default
   (stronger) cost.
+
+---
+
+## Video Streaming from Google Cloud Storage
+
+Rented movies are watched on `watch.php`, which embeds a `<video>` player
+pointed at `stream.php`. Videos live in a **private** GCS bucket
+(`inf2003-bucket`); `stream.php` serves them via short-lived **signed URLs**
+rather than proxying the bytes through the web server.
+
+### How it works
+
+1. `stream.php` checks the user has an **active rental** for the movie
+   (`active_loan()`), exactly as before — this is the access gate.
+2. It then generates a V4 **signed URL** for the object in GCS
+   (`gcs_signed_video_url()` in `config.php`) and 302-redirects the player to
+   it. The browser streams directly from Google (range requests / seeking
+   handled natively by GCS), so no video bytes pass through the VM.
+3. The signed URL's lifetime is capped at the rental end:
+   `min(GCS_URL_TTL, time until end_date)`, so a URL can never outlive the loan.
+
+Config constants (in `config.php`): `GCS_BUCKET`, `GCS_VIDEO_OBJECT` (currently
+every movie plays the shared `placeholder.mp4`), `GCS_URL_TTL`.
+
+### Authentication (keyless, via the VM service account)
+
+Signing uses Application Default Credentials — the GCP VM's attached service
+account — with **no key file** (the project enforces
+`constraints/iam.disableServiceAccountKeyCreation`, so key files are not an
+option). Keyless V4 signing delegates to the IAM Credentials `signBlob` API.
+Setup that was required:
+
+- `google/cloud-storage` installed via Composer into the app's `vendor/`.
+- Enable the IAM Service Account Credentials API:
+  `gcloud services enable iamcredentials.googleapis.com`.
+- Grant the VM service account the ability to sign on its own behalf:
+  `roles/iam.serviceAccountTokenCreator` on itself.
+- Grant it read on the bucket: `roles/storage.objectViewer` on
+  `gs://inf2003-bucket`.
+
+No `GOOGLE_APPLICATION_CREDENTIALS` is set — on a GCP VM the metadata server
+supplies the service-account credentials to the PHP process automatically.
+
+Quick signing test (CLI):
+
+```bash
+php -r 'require "config.php"; var_dump(gcs_signed_video_url(GCS_VIDEO_OBJECT, time()+600));'
+```
+
+### Design notes / tradeoffs
+
+- **Why signed URLs (not proxying):** the server does no bandwidth/CPU work per
+  stream, GCS handles seeking, and the bucket stays private. This is how real
+  streaming services serve protected media.
+- **Rental cutoff is softer than local streaming.** The previous local-file
+  path killed the stream per-chunk the instant the rental clock passed. With a
+  signed URL, once issued it is valid until expiry — capped at the rental end,
+  so worst case a viewer keeps playing until `end_date +1 day` midnight. The
+  `watch.php` client-side timer still stops playback at the deadline. This is the
+  inherent tradeoff of the signed-URL approach (scalability) vs proxying (tight,
+  immediate control).
+- **Fallbacks:** if signing fails, `stream.php` falls back to a local
+  `VIDEO_DIR/<id>.mp4` file, then to `DEMO_VIDEO_URL`, so playback still works in
+  development without GCS configured.
+- **Per-movie videos:** every movie currently streams `placeholder.mp4`. To use
+  real per-movie files, name objects by movie id and build `GCS_VIDEO_OBJECT`
+  from the id instead of the constant.

@@ -80,6 +80,14 @@ $indexes = [
         'name' => 'status_1',
         'why'  => "api.php status='Released' filter",
     ],
+    [
+        // Multikey index over the genresList array. Supports the index.php
+        // genre filter (match ALL selected genres via $all). Indexing an array
+        // field makes MongoDB create one index entry per element (multikey).
+        'key'  => ['genresList' => 1],
+        'name' => 'genresList_1',
+        'why'  => 'index.php genre tickbox filter ($all on genresList)',
+    ],
 ];
 
 foreach ($indexes as $ix) {

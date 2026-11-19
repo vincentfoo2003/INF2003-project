@@ -44,6 +44,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute([$deleteId]);
             flash("Loan ID $deleteId deleted successfully.");
         }
+    } elseif ($action === 'delete_user') {
+        // Admin deletes ANOTHER user here. Self-deletion is only allowed from
+        // the admin's own dashboard, so a self-target via this path is refused
+        // even if forged. The helper still enforces: no deleting other admins.
+        $targetId = (int)($_POST['target_user_id'] ?? 0);
+        if ($targetId === (int)$user['user_id']) {
+            flash('Delete your own account from your dashboard, not here.', 'error');
+        } else {
+            [$ok, $msg] = delete_user_account((int)$user['user_id'], $targetId);
+            flash($ok ? "User ID $targetId deleted (with their loans and payments)." : $msg, $ok ? 'success' : 'error');
+        }
     }
     
     header('Location: admin_dashboard.php');
@@ -221,7 +232,7 @@ page_header('Admin Management');
                     <td><?= e($u['name']) ?></td>
                     <td><?= e($u['email']) ?></td>
                     <td><?= e($u['role']) ?></td>
-                    <td>
+                    <td style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
                         <form method="POST" class="inline-form" style="display:flex; gap:0.5rem; align-items:center;">
                             <?= csrf_field() ?>
                             <input type="hidden" name="action" value="update_role">
@@ -232,6 +243,23 @@ page_header('Admin Management');
                             </select>
                             <button type="submit" class="btn btn-small">Save</button>
                         </form>
+                        <?php
+                        // The admin users table is for managing OTHER users only.
+                        // An admin deletes their own account from their personal
+                        // dashboard, not here — so never show Delete on the self
+                        // row. Delete still shows for deletable (non-admin) users.
+                        $selfRow = ((int)$u['user_id'] === (int)$user['user_id']);
+                        [$canDel] = can_delete_user((int)$user['user_id'], (int)$u['user_id']);
+                        if ($canDel && !$selfRow):
+                        ?>
+                            <form method="POST" class="inline-form" style="margin:0;"
+                                  onsubmit="return confirm('Delete user <?= e(addslashes($u['name'])) ?> (ID <?= e($u['user_id']) ?>)? Their loans and payments will also be deleted. This cannot be undone.');">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="action" value="delete_user">
+                                <input type="hidden" name="target_user_id" value="<?= e($u['user_id']) ?>">
+                                <button type="submit" class="btn btn-small btn-ghost" style="color: var(--danger); border-color: var(--danger);">Delete</button>
+                            </form>
+                        <?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>

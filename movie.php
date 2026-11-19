@@ -25,6 +25,58 @@ $user = current_user();
 $loan = $user !== null ? active_loan((int)$user['user_id'], $movieId) : null;
 $placeholder = placeholder_poster();
 
+const REVIEW_MAX_LEN = 1000;
+
+/*
+ * Handle a review submission (POST). Must run before any output so we can
+ * redirect. Only logged-in users may post. The review is written to the
+ * movie_reviews collection in the same shape as existing documents
+ * (reviewid, title, userRating, date, reviewContent); setting `title` links
+ * it to this movie and keeps it covered by the { title:1, date:-1 } index.
+ */
+$reviewErrors = [];
+$reviewDraft  = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_review') {
+    csrf_check();
+
+    if ($user === null) {
+        flash('Please log in to write a review.', 'error');
+        header('Location: login.php'); exit;
+    }
+
+    $rating  = (int)($_POST['rating'] ?? 0);
+    $content = trim((string)($_POST['review'] ?? ''));
+    $reviewDraft = $content;
+
+    if ($rating < 1 || $rating > 10) {
+        $reviewErrors[] = 'Please choose a rating between 1 and 10.';
+    }
+    if ($content === '') {
+        $reviewErrors[] = 'Please write something in your review.';
+    } elseif (text_length($content) > REVIEW_MAX_LEN) {
+        // Server-side length guard (the real limit; maxlength on the field is only UX).
+        $reviewErrors[] = 'Your review must be ' . REVIEW_MAX_LEN . ' characters or fewer.';
+    }
+
+    if (!$reviewErrors) {
+        try {
+            mongo_db_collection('movie_reviews')->insertOne([
+                'reviewid'      => 'REV-' . strtoupper(bin2hex(random_bytes(6))),
+                'title'         => (string)$movie['title'],
+                'userRating'    => $rating,
+                'date'          => date('Y-m-d'),
+                'reviewContent' => $content,
+            ]);
+            flash('Thanks! Your review has been posted.');
+            // Redirect (PRG) so a refresh doesn't resubmit.
+            header('Location: movie.php?id=' . urlencode($movieId)); exit;
+        } catch (Throwable $e) {
+            error_log('movie.php add_review: ' . $e->getMessage());
+            $reviewErrors[] = 'Sorry, your review could not be saved. Please try again.';
+        }
+    }
+}
+
 /*
  * Reviews live in the movie_reviews collection and reference the movie by
  * its title string (there is no movie _id on the review). We fetch the
@@ -196,6 +248,52 @@ page_header((string)$movie['title']);
         </span>
     </h2>
 
+    <?php if ($user !== null): ?>
+        <form method="post" action="movie.php?id=<?= e($movieId) ?>" class="panel" style="margin-bottom:20px; padding:16px;">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="add_review">
+            <h3 style="margin-top:0;">Write a review</h3>
+
+            <?php if ($reviewErrors): ?>
+                <div class="alert alert-error"><ul style="margin:0; padding-left:1.2em;">
+                    <?php foreach ($reviewErrors as $err): ?><li><?= e($err) ?></li><?php endforeach; ?>
+                </ul></div>
+            <?php endif; ?>
+
+            <label for="rating">Your rating</label>
+            <select id="rating" name="rating" required style="padding:6px 8px; border:1px solid var(--line); border-radius:var(--radius);">
+                <option value="">Choose…</option>
+                <?php for ($i = 10; $i >= 1; $i--): ?>
+                    <option value="<?= $i ?>"<?= (int)($_POST['rating'] ?? 0) === $i ? ' selected' : '' ?>><?= $i ?> / 10</option>
+                <?php endfor; ?>
+            </select>
+
+            <label for="review" style="display:block; margin-top:12px;">Your review</label>
+            <textarea id="review" name="review" rows="4" maxlength="<?= REVIEW_MAX_LEN ?>" required
+                      style="width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius);"
+                      placeholder="Share what you thought (max <?= REVIEW_MAX_LEN ?> characters)."><?= e($reviewDraft) ?></textarea>
+            <p class="muted" style="margin:4px 0 12px;">
+                <span id="review-count">0</span> / <?= REVIEW_MAX_LEN ?> characters
+            </p>
+
+            <button type="submit" class="btn">Post review</button>
+        </form>
+        <script>
+        (function () {
+            var ta = document.getElementById('review');
+            var out = document.getElementById('review-count');
+            if (!ta || !out) return;
+            function upd() { out.textContent = ta.value.length; }
+            ta.addEventListener('input', upd);
+            upd();
+        })();
+        </script>
+    <?php else: ?>
+        <p class="muted" style="margin-bottom:20px;">
+            <a href="login.php">Log in</a> to write a review.
+        </p>
+    <?php endif; ?>
+
     <?php if (empty($reviews)): ?>
         <p class="empty">No reviews yet for this movie.</p>
     <?php else: ?>
@@ -207,7 +305,7 @@ page_header((string)$movie['title']);
                 <li style="background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; box-shadow:0 1px 2px rgba(0,0,0,0.05);">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
                         <span class="rating">&#9733; <?= e((string)(int)($rev['userRating'] ?? 0)) ?>/10</span>
-                        <span class="muted" style="font-size:0.85rem;"><?= e((string)($rev['date'] ?? '')) ?></span>
+                        <span class="muted" style="font-size:0.85rem;"><?= e(format_review_date((string)($rev['date'] ?? ''))) ?></span>
                     </div>
                     <p style="margin:0; line-height:1.5;"><?= e((string)($rev['reviewContent'] ?? '')) ?></p>
                 </li>

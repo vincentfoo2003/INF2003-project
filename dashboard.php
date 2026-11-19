@@ -114,4 +114,29 @@ page_header('My Dashboard');
     <?php endif; ?>
 </div>
 
+<?php
+// Pre-check: may this user delete their own account? A regular user always can;
+// an admin can unless they are the last admin. The check decides whether we
+// even show the button (so the last admin never reaches a confirm dialog).
+[$canSelfDelete, $selfDeleteReason] = can_delete_user((int)$user['user_id'], (int)$user['user_id']);
+?>
+<div class="panel" style="margin-top: 2rem; border-color: var(--danger);">
+    <h2 style="color: var(--danger); margin-top: 0;">Delete account</h2>
+    <?php if ($canSelfDelete): ?>
+        <p class="muted">
+            Permanently delete your account. This also removes <strong>all your
+            rentals and payment records</strong> and cannot be undone.
+        </p>
+        <form method="post" action="delete_account.php"
+              onsubmit="return confirm('Delete your account permanently? All your rentals and payment records will be erased. This cannot be undone.');">
+            <?= csrf_field() ?>
+            <button type="submit" class="btn" style="background: var(--danger); border-color: var(--danger);">
+                Delete my account
+            </button>
+        </form>
+    <?php else: ?>
+        <p class="muted"><?= e($selfDeleteReason) ?></p>
+    <?php endif; ?>
+</div>
+
 <?php page_footer(); ?>

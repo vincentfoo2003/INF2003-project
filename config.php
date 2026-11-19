@@ -129,6 +129,35 @@ function text_length(string $s): int {
     return function_exists('mb_strlen') ? mb_strlen($s) : strlen($s);
 }
 
+/*
+ * Render a movie_reviews `date` value uniformly, whatever format it is stored
+ * in. Existing/imported reviews use "D/M/Y" (e.g. 22/11/1998); reviews created
+ * by the app store ISO "Y-m-d" (which also sorts chronologically as a string).
+ * Both are normalised to a single human format, e.g. "22 Nov 1998".
+ *
+ * Unrecognised/empty values are returned as-is (escaped by the caller), so a
+ * bad date never breaks the page.
+ */
+function format_review_date(string $raw): string {
+    $raw = trim($raw);
+    if ($raw === '') return '';
+
+    // ISO: YYYY-MM-DD
+    if (preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})$/', $raw, $m)) {
+        $y = (int)$m[1]; $mo = (int)$m[2]; $d = (int)$m[3];
+    // D/M/Y: day/month/year
+    } elseif (preg_match('#^(\d{1,2})/(\d{1,2})/(\d{4})$#', $raw, $m)) {
+        $d = (int)$m[1]; $mo = (int)$m[2]; $y = (int)$m[3];
+    } else {
+        return $raw; // unknown shape — show the raw string rather than guess
+    }
+
+    if ($mo < 1 || $mo > 12 || $d < 1 || $d > 31) return $raw;
+
+    $ts = mktime(0, 0, 0, $mo, $d, $y);
+    return $ts === false ? $raw : date('j M Y', $ts); // e.g. 22 Nov 1998
+}
+
 /* CSRF */
 function csrf_token(): string {
     if (empty($_SESSION['csrf']) || !is_string($_SESSION['csrf'])) {
@@ -172,6 +201,102 @@ function require_login(): array {
         header('Location: login.php'); exit;
     }
     return $user;
+}
+
+/* Number of admin accounts (used to protect the last admin). */
+function admin_count(): int {
+    return (int)db()->query("SELECT COUNT(*) FROM users WHERE role = 'admin'")->fetchColumn();
+}
+
+/*
+ * Decide whether $requesterId may delete the account $targetId, WITHOUT
+ * performing the delete. Used by the UI to decide whether to even offer a
+ * confirmation. Rules:
+ *   - A regular user may delete only their own account.
+ *   - An admin may delete any NON-admin account.
+ *   - An admin may delete their OWN admin account, but only if they are not
+ *     the last admin left.
+ *   - No one may delete someone else's admin account.
+ *
+ * Returns [allowed(bool), reason(string)]. reason explains a denial.
+ */
+function can_delete_user(int $requesterId, int $targetId): array {
+    if ($requesterId <= 0 || $targetId <= 0) {
+        return [false, 'Invalid user.'];
+    }
+    $pdo = db();
+
+    $stmt = $pdo->prepare('SELECT user_id, role FROM users WHERE user_id = ? LIMIT 1');
+    $stmt->execute([$targetId]);
+    $target = $stmt->fetch();
+    if ($target === false) {
+        return [false, 'That account no longer exists.'];
+    }
+
+    $stmt = $pdo->prepare('SELECT role FROM users WHERE user_id = ? LIMIT 1');
+    $stmt->execute([$requesterId]);
+    $requesterRole = $stmt->fetchColumn();
+    if ($requesterRole === false) {
+        return [false, 'Invalid request.'];
+    }
+
+    $isSelf        = ($requesterId === $targetId);
+    $targetIsAdmin = ($target['role'] === 'admin');
+
+    // Authorisation: who may even attempt this target?
+    if ($requesterRole !== 'admin' && !$isSelf) {
+        return [false, 'You can only delete your own account.'];
+    }
+    if ($targetIsAdmin && !$isSelf) {
+        // Admins cannot delete OTHER admin accounts.
+        return [false, 'You cannot delete another admin account.'];
+    }
+    if ($targetIsAdmin && $isSelf && admin_count() <= 1) {
+        // The last admin cannot delete themselves.
+        return [false, 'You are the last admin and cannot delete your own account.'];
+    }
+    return [true, ''];
+}
+
+/*
+ * Delete a user account. $requesterId is who is performing the delete, so the
+ * self-vs-other and last-admin rules can be enforced here (the real security
+ * boundary — the UI pre-check is only convenience). Re-checks everything
+ * can_delete_user() does, inside the same request, before deleting.
+ *
+ * WARNING: destructive. loans.user_id and payments.user_id use ON DELETE
+ * CASCADE, so removing a user also removes all of that user's loans and
+ * payments. Irreversible.
+ *
+ * Returns [ok(bool), message(string)].
+ */
+function delete_user_account(int $requesterId, int $targetId): array {
+    [$allowed, $reason] = can_delete_user($requesterId, $targetId);
+    if (!$allowed) {
+        return [false, $reason];
+    }
+
+    $pdo = db();
+
+    // Guard against a race where the target became the last admin between the
+    // check and the delete: only delete admins when more than one exists.
+    $stmt = $pdo->prepare('SELECT role FROM users WHERE user_id = ? LIMIT 1');
+    $stmt->execute([$targetId]);
+    $role = $stmt->fetchColumn();
+    if ($role === false) {
+        return [false, 'That account no longer exists.'];
+    }
+    if ($role === 'admin' && admin_count() <= 1) {
+        return [false, 'Cannot delete the last admin account.'];
+    }
+
+    $del = $pdo->prepare('DELETE FROM users WHERE user_id = ?');
+    $del->execute([$targetId]);
+
+    if ($del->rowCount() === 0) {
+        return [false, 'Account could not be deleted.'];
+    }
+    return [true, 'Account deleted.'];
 }
 
 /* Cart */

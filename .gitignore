@@ -1,0 +1,10 @@
+# Personal reference notes — not part of the app
+mysql_crud_reference.txt
+
+# Benchmark output (generated locally/on the VM)
+benchmark_results.md
+mysql_benchmark_results.md
+
+# Secrets / credentials — never commit
+gcs-key.json
+*.key.json

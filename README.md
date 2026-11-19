@@ -425,3 +425,45 @@ php -r 'require "config.php"; var_dump(gcs_signed_video_url(GCS_VIDEO_OBJECT, ti
 - **Per-movie videos:** every movie currently streams `placeholder.mp4`. To use
   real per-movie files, name objects by movie id and build `GCS_VIDEO_OBJECT`
   from the id instead of the constant.
+
+---
+
+## Account Deletion
+
+Users and admins can delete accounts. Deletion is a **hard delete**: the
+`loans.user_id` and `payments.user_id` foreign keys use `ON DELETE CASCADE`, so
+removing a user also permanently removes all of that user's loans and payments.
+This is irreversible, so every path requires an explicit confirmation.
+
+### Who can delete whom
+
+| Actor | Target | Allowed? |
+|---|---|---|
+| Regular user | own account | yes |
+| Regular user | any other account | no |
+| Admin | any non-admin user | yes (from the admin dashboard) |
+| Admin | another admin's account | no |
+| Admin | own admin account | yes, **from their own dashboard only**, and **only if not the last admin** |
+| Last remaining admin | own account | no — rejected |
+
+Self-deletion (including an admin's own account) happens on the personal
+dashboard (`delete_account.php`). The admin dashboard's user table only deletes
+**other** users; it never shows or accepts a delete of the acting admin's own
+row.
+
+### Where the rules are enforced
+
+The logic lives in one place, `config.php`:
+
+- `admin_count()` — number of admin accounts.
+- `can_delete_user($requesterId, $targetId)` — a side-effect-free check of all
+  the rules above. The UI calls it **before** rendering a delete control, so a
+  forbidden deletion (e.g. the last admin deleting themselves) never even
+  reaches a confirmation dialog.
+- `delete_user_account($requesterId, $targetId)` — re-runs the same checks and
+  re-counts admins inside the request, then performs the delete. This is the
+  real security boundary: a forged POST that bypasses the UI is still rejected,
+  and the admin re-count guards against a race where two admins delete at once.
+
+The "last admin" count is checked both before showing the button and again at
+delete time, so the system can never be left with zero admins.

@@ -170,6 +170,46 @@ win is large end-to-end.
 > Reviews are matched by exact `title` string (the only link the data provides),
 > so the match is case- and whitespace-sensitive.
 
+### Genre filter (multikey index on an array field)
+
+`index.php` has a genre tickbox filter that shows movies matching **all** the
+ticked genres. The `genres` field is stored as a comma-separated **string**
+(e.g. "Action, Science Fiction, Adventure"), which cannot support "match all"
+semantics or a useful index. So `tools/migrate_genres.php` backfills a parallel
+`genresList` **array** field (trimmed genre names), and the filter queries it
+with `$all`:
+
+```php
+['genresList' => ['$all' => $selectedGenres]]   // e.g. ["Drama", "Crime"]
+```
+
+An index on an array field is a **multikey index** — MongoDB stores one index
+entry per array element — so `genresList_1` ({ genresList: 1 }) serves the
+`$all` filter. The same script also reports the 30 most common genres, which are
+hardcoded as the tickbox options (the dataset has 19 distinct genres).
+
+#### Measured result
+
+Measured with `explain('executionStats')` on a deliberately **rare** genre
+combination with no `limit`, so a collection scan cannot terminate early and
+must examine the whole collection — the fair test of the index:
+
+| | Before (no index) | After (`genresList_1`) |
+|---|---|---|
+| Plan | COLLSCAN | IXSCAN → FETCH |
+| Documents examined | 121,908 (whole collection) | 3,447 |
+| Server exec time | ~397 ms | ~21 ms |
+
+A ~19x server-side improvement. Without the index MongoDB scanned all 121,908
+documents; the multikey index narrowed the candidates to the ~3,447 tagged with
+the first `$all` term, then filtered those for the full match.
+
+> Measurement caveat: a *common* genre combination with a small `limit` (e.g.
+> `["Drama","Crime"]` limit 24) is NOT a fair test — the scan finds 24 matches
+> after ~300 docs and stops, so it looks as fast as the index. The index's value
+> shows when the query is selective enough that a scan must traverse most of the
+> collection.
+
 ### Measuring a real record: server-side vs client-side
 
 The two layers are measured with different tools, because a CLI script has no
@@ -290,20 +330,50 @@ WHERE l.user_id = ? ORDER BY l.start_date DESC
 
 The existing `idx_loans_user` filters by user but does **not** cover the
 `ORDER BY start_date`, so MySQL did a separate filesort. The composite index
-`loans(user_id, start_date)` (created by `create_mysql_indexes.php`) covers both:
+`loans(user_id, start_date)` (created by `create_mysql_indexes.php`) covers both.
 
-| | Before | After |
+Measured with `EXPLAIN ANALYZE` on a user with **30,000 loans** (so the sort has
+real work), which reports actual server-side execution time per plan step —
+isolating query cost from the ~140 ms network round-trip that otherwise hides it
+in end-to-end wall-clock:
+
+| | Before (no composite index) | After (composite index) |
 |---|---|---|
-| Index chosen | `idx_loans_user` | `idx_loans_user_startdate` |
-| `Extra` (EXPLAIN) | **Using filesort** | **(no filesort)** |
-| wall median | ~4.95 ms | ~5.8 ms (within noise) |
+| Plan | Index lookup on `idx_loans_user`, then a `Sort` node | Covering index scan on `idx_loans_user_startdate` (reverse) |
+| Filesort | Yes (`Sort: l.start_date DESC`) | None |
+| Server-side actual time | **~54 ms** | **~15 ms** |
+| Rows | 30,000 | 30,000 |
 
-The plan improvement is the real result: the filesort is eliminated. The
-wall-clock is unchanged because the test user has ~1,000 loans and the sort was
-already sub-millisecond against a ~5 ms query floor — the index's benefit scales
-with the number of rows a user has, so it matters more as data grows. (This is
-the same honest pattern as the MongoDB projection: a clear structural win that
-the clock does not show at this scale.)
+A real **~3.5x** server-side improvement. The `EXPLAIN ANALYZE` plans show why:
+
+```
+BEFORE:
+-> Sort: l.start_date DESC  (actual time=52.3..54 rows=30000)
+    -> Index lookup on l using idx_loans_user (user_id=1694)  (actual time=0.245..41.2 rows=30000)
+
+AFTER:
+-> Covering index lookup on l using idx_loans_user_startdate (user_id=1694) (reverse)
+   (actual time=0.0858..15.3 rows=30000)
+```
+
+Two effects combine:
+
+1. **Filesort eliminated.** The before-plan has an explicit `Sort` node (the
+   filesort) that pushes total time to ~54 ms; the after-plan has none, because
+   the composite index already stores rows in `(user_id, start_date)` order and
+   is read in reverse for `start_date DESC`.
+2. **Covering index.** The after-plan is a *covering* index scan — the query
+   needs only `loan_id` and `start_date`, both available from the index (plus
+   the implicit PK), so MySQL answers entirely from the index without reading
+   table rows.
+
+Note on measurement: the end-to-end benchmark (`mysql_benchmark.php`) showed
+~143 ms for this query in both states, because that wall-clock is dominated by
+the network round-trip and the cost of transferring 30k rows to PHP — the ~40 ms
+of sort work is invisible against it. `EXPLAIN ANALYZE` strips that away and
+exposes the actual difference. At the typical ~50 loans per user the filesort is
+sub-millisecond either way, so this gain scales with how many loans a single
+user has.
 
 > MySQL stores the index `start_date` ascending but serves the `DESC` sort via a
 > backward range scan, so one index covers both sort directions.
